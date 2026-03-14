@@ -1,34 +1,32 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
 
-# --- 1. 雲端設定 (請確保 Google Sheet 分頁名稱正確) ---
-# 分頁名稱務必改為英文：salary_data, emp_info, ins_info
+# --- 1. 雲端設定 ---
 SHEET_ID = "1DPOtSzamSDEbSZLkhpGNuTsBk-mqbsYHY6cGnHQDDOc"
 
 def get_sheet_url(sheet_name):
     return f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
 
-st.set_page_config(page_title="天康藥局雲端管理系統", layout="wide")
+st.set_page_config(page_title="天康藥局全功能管理系統", layout="wide")
 
-# --- 2. 核心功能：讀取並清洗資料 ---
+# --- 2. 核心功能：讀取資料並自動診斷 ---
 def load_cloud_data(name):
     try:
         url = get_sheet_url(name)
         df = pd.read_csv(url)
-        df.columns = df.columns.str.strip() # 自動刪除標題前後的空格，解決「找不到欄位」問題
+        # 這裡很關鍵：自動刪除所有欄位名稱的空格
+        df.columns = [str(c).strip() for c in df.columns]
         return df.dropna(how='all', axis=0)
     except:
         return pd.DataFrame()
 
 def main():
-    st.title("☁️ 天康連鎖藥局 - 雲端全功能管理系統")
+    st.title("☁️ 天康連鎖藥局 - 雲端管理系統 (含自動診斷)")
 
-    # --- 3. 登入邏輯 ---
+    # 登入邏輯
     if 'auth' not in st.session_state:
-        st.subheader("🔐 員工入口")
         user = st.text_input("帳號 (boss 或 mgr_04/11/12/13/15/77)")
-        if st.button("登入系統"):
+        if st.button("登入"):
             if user == "boss": st.session_state.auth, st.session_state.shop = 1, "ALL"
             elif user.startswith("mgr_"): st.session_state.auth, st.session_state.shop = 3, user.split("_")[1]
             else: st.error("帳號無效"); return
@@ -38,74 +36,80 @@ def main():
     role = st.session_state.auth
     shop = st.session_state.shop
     
-    # 建立三個分頁
-    tab1, tab2, tab3 = st.tabs(["💰 每月薪資核對", "👤 員工基本資料", "🏥 勞健保查詢"])
+    tab1, tab2, tab3 = st.tabs(["💰 薪資獎金核對", "👤 員工基本資料", "🏥 勞健保紀錄"])
 
     # --- Tab 1: 薪資作業 ---
     with tab1:
-        st.sidebar.header("📅 時間與篩選")
-        target_month = st.sidebar.selectbox("處理月份", ["2026-02", "2026-03", "2026-04"])
-        
         df_pay = load_cloud_data("salary_data")
-        df_emp = load_cloud_data("emp_info")
-
-        if df_pay.empty:
-            st.error("❌ 無法讀取『salary_data』分頁，請檢查 Google Sheet。")
+        
+        # 檢查關鍵欄位是否存在
+        required_cols = ['月份', '店別', '姓名']
+        missing_cols = [c for c in required_cols if c not in df_pay.columns]
+        
+        if missing_cols:
+            st.error(f"❌ 在 'salary_data' 分頁找不到這些欄位: {missing_cols}")
+            st.write("📊 目前電腦看到的欄位名稱有：", list(df_pay.columns))
+            st.info("💡 請去 Google Sheet 修改第一行，確保名字完全正確（沒有多餘的字或符號）。")
             return
 
-        # 過濾該月與店別
+        # 這裡開始執行功能
+        st.sidebar.header("📅 篩選設定")
+        target_month = st.sidebar.selectbox("處理月份", ["2026-02", "2026-03", "2026-04"])
+
+        # 格式轉換，確保比對成功
         df_pay['月份'] = df_pay['月份'].astype(str)
         df_pay['店別'] = df_pay['店別'].astype(str)
+        
         mask = (df_pay['月份'] == target_month)
         if role == 3: mask = mask & (df_pay['店別'] == shop)
         current_pay = df_pay[mask].copy()
 
-        # 核心：自動帶入資料 (勾稽 emp_info)
-        if st.button("🔍 勾稽基本資料 (自動補齊帳號/ID/本薪)"):
+        # 勾稽功能 (連動基本資料)
+        if st.button("🔍 自動補齊員工 ID 與 帳號"):
+            df_emp = load_cloud_data("emp_info")
             if not df_emp.empty:
-                # 根據姓名合併
-                current_pay = current_pay.drop(columns=['身分證字號', '收款帳號', '本薪'], errors='ignore')
-                current_pay = current_pay.merge(df_emp[['姓名', '身分證', '收款帳號', '本薪']], left_on='姓名', right_on='姓名', how='left')
-                st.success("✅ 已從『員工基本資料』同步最新帳號與本薪！")
+                # 移除重複欄位避免報錯
+                current_pay = current_pay.drop(columns=['身分證', '收款帳號'], errors='ignore')
+                # 根據姓名把 emp_info 的資料塞進來
+                current_pay = current_pay.merge(df_emp[['姓名', '身分證', '收款帳號']], on='姓名', how='left')
+                st.success("✅ 已根據基本資料庫補齊 ID 與 帳號！")
             else:
-                st.error("找不到 emp_info 資料。")
+                st.error("找不到 emp_info 資料庫。")
 
-        # 權限遮蔽
-        mgr_view_cols = ["月份", "店別", "姓名", "職務加給", "加班津貼", "店毛利成長獎金", "推廣獎金", "輔具推廣獎金", "慢籤成長獎金", "備註"]
-        display_cols = current_pay.columns if role == 1 else [c for c in mgr_view_cols if c in current_pay.columns]
+        # 店長遮蔽邏輯
+        mgr_show = ["月份", "店別", "姓名", "職務加給", "加班津貼", "店毛利成長獎金", "推廣獎金", "輔具推廣獎金", "慢籤成長獎金", "備註"]
+        display_cols = current_pay.columns if role == 1 else [c for c in mgr_show if c in current_pay.columns]
         
-        st.subheader(f"📍 {target_month} 薪資明細 ({'全體' if role==1 else f'店別 {shop}'})")
-        edited_df = st.data_editor(current_pay[display_cols], num_rows="dynamic", key="pay_edit")
+        st.subheader(f"📍 {target_month} 薪資明細")
+        st.data_editor(current_pay[display_cols], num_rows="dynamic", key="main_editor")
 
-        # 匯出功能 (雲端版改為下載按鈕)
         if role == 1:
             st.divider()
-            st.subheader("🏦 老闆專屬：產出網銀發薪檔")
-            if st.button("🚀 準備匯出檔案"):
-                # 這裡會產出一個下載按鈕
-                csv = edited_df.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📥 點我下載 2月網銀格式.csv", data=csv, file_name=f"tian_kang_bank_{target_month}.csv", mime="text/csv")
+            st.subheader("🏦 匯出銀行發薪檔")
+            pay_date = st.text_input("付款日期 (YYYYMMDD)", "20260305")
+            if st.button("🚀 準備下載 Excel"):
+                # 整理成銀行格式
+                bank_df = pd.DataFrame({
+                    "付款日期": pay_date,
+                    "轉帳項目": "901",
+                    "員工姓名": current_pay["姓名"],
+                    "員工ID": current_pay.get("身分證", ""),
+                    "收款帳號": current_pay.get("收款帳號", ""),
+                    "交易金額": current_pay.get("實領金額", 0)
+                })
+                csv = bank_df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("📥 點我下載網銀格式.csv", data=csv, file_name=f"bank_{target_month}.csv")
 
-    # --- Tab 2: 員工基本資料 (僅老闆可看可改) ---
+    # --- Tab 2 & 3 (簡化顯示) ---
     with tab2:
-        if role == 1:
-            st.header("👤 員工主資料庫")
-            st.info("💡 這裡的修改請直接在 Google Sheet 的『emp_info』分頁進行，網頁重新整理後會更新。")
-            st.dataframe(df_emp)
-        else:
-            st.warning("🔒 店長無權限查看員工私密資料。")
+        df_emp = load_cloud_data("emp_info")
+        st.write("👤 員工資料庫內容：")
+        st.dataframe(df_emp)
 
-    # --- Tab 3: 勞健保查詢 ---
     with tab3:
-        st.header("🏥 勞健保與加退保紀錄")
         df_ins = load_cloud_data("ins_info")
-        if not df_ins.empty:
-            if role == 3:
-                st.dataframe(df_ins[df_ins['店別'].astype(str) == shop])
-            else:
-                st.dataframe(df_ins)
-        else:
-            st.write("目前無資料。")
+        st.write("🏥 勞健保資料內容：")
+        st.dataframe(df_ins)
 
 if __name__ == "__main__":
     main()
