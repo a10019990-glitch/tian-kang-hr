@@ -67,7 +67,7 @@ def main():
                 else: st.error("帳號或密碼錯誤")
 
         elif mode == "管理端登入":
-            admin = st.text_input("管理帳號 (boss, mgr_xx, 或 acct)")
+            admin = st.text_input("管理帳號 (mgr_xx, 或 acct)")
             if st.button("進入系統"):
                 if admin == "boss":
                     st.session_state.auth, st.session_state.shop = 1, "ALL"
