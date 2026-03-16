@@ -72,7 +72,7 @@ def main():
                 else: st.warning("⚠️ 請完整輸入資訊")
 
         elif mode == "管理後台登入":
-            admin = st.text_input("管理員代號 (boss 或 mgr_xx)")
+            admin = st.text_input("管理員代號 (mgr_xx)")
             if st.button("進入管理介面"):
                 if admin == "boss": st.session_state.auth, st.session_state.shop = 1, "ALL"; st.rerun()
                 elif admin.startswith("mgr_"): 
