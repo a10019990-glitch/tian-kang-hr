@@ -93,4 +93,27 @@ def main():
                 st.subheader(f"📅 {target_month} 獎金核對表")
                 # 隱藏敏感欄位給店長
                 mgr_cols = ["月份", "店別", "姓名", "職務加給", "加班津貼", "店毛利成長獎金", "推廣獎金", "輔具推廣獎金", "慢籤成長獎金", "備註"]
-                cols = display_df.columns if role == 1 else [c for c in mgr_cols if c
+                cols = display_df.columns if role == 1 else [c for c in mgr_cols if c in display_df.columns]
+                
+                edited = st.data_editor(display_df[cols], key="editor", num_rows="dynamic")
+
+                if st.button("💾 同步資料至雲端"):
+                    # 合併邏輯：排除掉目前正在看的這組(月份+店別)，再把編輯後的加回去
+                    if role == 1:
+                        # 老闆存檔邏輯：排除該月份所有店，或根據編輯後的內容覆蓋
+                        save_mask = (df_pay['月份'] == target_month)
+                    else:
+                        save_mask = (df_pay['月份'] == target_month) & (df_pay['店別'] == shop)
+                    
+                    others = df_pay[~save_mask]
+                    final = pd.concat([others, edited], ignore_index=True)
+                    conn.update(worksheet=PAY_SHEET, data=final)
+                    st.success("✅ 雲端已更新！")
+    
+    with tab2:
+        st.subheader("👤 員工清單")
+        emp_mask = (df_emp['店別'] == shop) if role == 3 else [True] * len(df_emp)
+        st.dataframe(df_emp[emp_mask])
+
+if __name__ == "__main__":
+    main()
