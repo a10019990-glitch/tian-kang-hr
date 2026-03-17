@@ -49,7 +49,7 @@ def generate_bank_csv(df_source, df_employee, target_m):
     return bank.to_csv(index=False).encode('utf-8-sig')
 
 def main():
-    st.title("🚀 天康連鎖藥局 - 薪資與勞健保管理系統")
+    st.title("🚀 天康連鎖藥局")
     conn = st.connection("gsheets", type=GSheetsConnection)
 
     if st.sidebar.button("🔄 刷新雲端資料"):
