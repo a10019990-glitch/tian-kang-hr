@@ -14,7 +14,7 @@ ACC_SHEET = "user_accounts"
 
 st.set_page_config(page_title="天康藥局雲端管理系統", layout="wide")
 
-# --- 加密與清洗工具 ---
+# --- 工具函數 ---
 def hash_password(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
@@ -24,9 +24,8 @@ def robust_clean(df, expected_cols=None):
     mapping = {
         "店別": "店別", "店號": "店別", "姓名": "姓名", "月份": "月份",
         "勞健保自負額": "勞健保自負額", "身分證": "身分證", "單位": "單位",
-        "基本薪資合計": "基本薪資合計", "執照津貼": "執照津貼", "車資補貼": "車資補貼"
+        "基本薪資合計": "基本薪資合計", "執照津貼": "執照津貼", "車資補貼": "車資補貼", "備註": "備註"
     }
-    # 模糊對齊
     new_mapping = {}
     for c in df.columns:
         for k, v in mapping.items():
@@ -35,12 +34,10 @@ def robust_clean(df, expected_cols=None):
     
     if expected_cols:
         for col in expected_cols:
-            if col not in df.columns: df[col] = 0 if any(x in col for x in ["獎金", "津貼", "合計", "補貼", "訪"]) else ""
+            if col not in df.columns: 
+                df[col] = 0 if any(x in col for x in ["獎金", "津貼", "合計", "補貼", "訪", "自負額"]) else ""
     
-    # 單位資料特別清洗：去掉所有空格
-    if "單位" in df.columns:
-        df["單位"] = df["單位"].astype(str).str.strip()
-
+    if "單位" in df.columns: df["單位"] = df["單位"].astype(str).str.strip()
     if "店別" in df.columns:
         df["店別"] = df["店別"].apply(lambda x: re.findall(r'\d+', str(x))[0].zfill(2) if re.findall(r'\d+', str(x)) else str(x).strip())
     return df
@@ -75,7 +72,7 @@ def main():
         df_ins = robust_clean(conn.read(worksheet=INS_SHEET, ttl=300), expected_cols=['姓名', '月份', '勞健保自負額'])
         df_acc = robust_clean(conn.read(worksheet=ACC_SHEET, ttl=300))
     except Exception as e:
-        st.error(f"❌ 雲端資料庫讀取失敗，請確認分頁名稱是否正確。"); st.stop()
+        st.error(f"❌ 雲端資料庫讀取失敗: {e}"); st.stop()
 
     # --- 登入控制 (不刪減帳密邏輯) ---
     if 'auth' not in st.session_state:
@@ -102,12 +99,23 @@ def main():
             with st.sidebar.expander("➕ [管理] 建立新月份"):
                 nm = st.text_input("新月份", "2026-04")
                 if st.button("執行建立"):
-                    # 繼承備註邏輯
-                    latest_rem = df_pay.sort_values(['姓名','月份'], ascending=[True,False]).drop_duplicates('姓名')[['姓名','備註']] if not df_pay.empty else pd.DataFrame(columns=['姓名','備註'])
-                    df_t = df_emp.merge(latest_rem, on='姓名', how='left')
-                    new_r = pd.DataFrame({"月份":[nm]*len(df_emp), "店別":df_emp["店別"], "姓名":df_emp["姓名"], "備註":df_t["備註"].fillna("")})
+                    # 【修復邏輯】確保備註繼承不會當機
+                    if not df_pay.empty and "備註" in df_pay.columns:
+                        latest_rem = df_pay.sort_values(['姓名','月份'], ascending=[True,False]).drop_duplicates('姓名')[['姓名','備註']]
+                        df_t = df_emp.merge(latest_rem, on='姓名', how='left')
+                        initial_remarks = df_t["備註"].fillna("")
+                    else:
+                        initial_remarks = [""] * len(df_emp)
+
+                    new_r = pd.DataFrame({
+                        "月份": [nm] * len(df_emp),
+                        "店別": df_emp["店別"],
+                        "姓名": df_emp["姓名"],
+                        "備註": initial_remarks
+                    })
                     for c in ALL_VAR_COLS: new_r[c] = 0
-                    conn.update(worksheet=PAY_SHEET, data=pd.concat([df_pay, new_r], ignore_index=True)); st.cache_data.clear(); st.rerun()
+                    conn.update(worksheet=PAY_SHEET, data=pd.concat([df_pay, new_r], ignore_index=True))
+                    st.cache_data.clear(); st.success(f"✅ {nm} 建立成功"); st.rerun()
 
         target_m = st.sidebar.selectbox("月份", sorted(df_pay['月份'].unique().tolist(), reverse=True) if not df_pay.empty else ["無"])
         curr = df_pay[df_pay['月份'] == target_m].copy()
@@ -116,7 +124,7 @@ def main():
         # 核心計算
         df_s = df_ins[df_ins['月份'] <= target_m].sort_values(['姓名', '月份'], ascending=[True, False])
         l_ins = df_s.drop_duplicates('姓名')[['姓名', '勞健保自負額']]
-        curr = curr.merge(df_emp[['姓名','單位','基本薪資合計','執照津貼','車資補貼']], on='姓名', how='left')
+        curr = curr.merge(df_emp[['姓名','單位','基本薪資合計','執照津貼','車資補貼']], on='姓名', how='left', suffixes=('', '_emp'))
         curr = curr.merge(l_ins, on='姓名', how='left')
         
         num_cols = ALL_VAR_COLS + ['基本薪資合計', '執照津貼', '車資補貼', '勞健保自負額']
@@ -125,12 +133,9 @@ def main():
 
         st.subheader(f"📅 {target_m} 薪資編輯")
         
-        # 老闆專用診斷區：如果按鈕不見了，看這裡就知道為什麼
         if role == 1:
             with st.expander("🔍 [大助診斷區] 單位過濾狀態"):
                 st.write("目前資料表中的單位清單：", curr['單位'].unique().tolist())
-                st.write("藥局人數：", len(curr[curr['單位'] == '藥局']))
-                st.write("個管師人數：", len(curr[curr['單位'] == '個管師']))
 
         unit_filter = st.radio("篩選單位顯示", ["全部", "藥局", "個管師"], horizontal=True)
         display_df = curr.copy()
@@ -152,30 +157,20 @@ def main():
 
         if role == 1:
             st.markdown("---")
-            st.subheader("🚀 網銀發薪匯出")
             c1, c2 = st.columns(2)
-            
-            # 藥局匯出邏輯
             with c1:
                 df_ph = curr[curr['單位'] == '藥局']
-                if not df_ph.empty:
-                    st.download_button("📥 下載【藥局】網銀檔", generate_bank_csv(df_ph, df_emp, target_m), f"Pharmacy_{target_m}.csv", use_container_width=True)
-                else:
-                    st.warning("⚠️ 藥局目前無資料 (單位欄位須完全符合『藥局』二字)")
-
-            # 個管師匯出邏輯 (加強版)
+                if not df_ph.empty: st.download_button("📥 下載【藥局】網銀檔", generate_bank_csv(df_ph, df_emp, target_m), f"Pharmacy_{target_m}.csv", use_container_width=True)
+                else: st.warning("⚠️ 藥局目前無資料")
             with c2:
                 df_cm = curr[curr['單位'] == '個管師']
-                if not df_cm.empty:
-                    st.download_button("📥 下載【個管師】網銀檔", generate_bank_csv(df_cm, df_emp, target_m), f"CaseManager_{target_m}.csv", use_container_width=True)
-                else:
-                    st.warning("⚠️ 個管師目前無資料 (單位欄位須完全符合『個管師』三字)")
+                if not df_cm.empty: st.download_button("📥 下載【個管師】網銀檔", generate_bank_csv(df_cm, df_emp, target_m), f"CaseManager_{target_m}.csv", use_container_width=True)
+                else: st.warning("⚠️ 個管師目前無資料")
 
     with tabs[1]: # 員工資料
         if role == 1:
             e_emp = st.data_editor(df_emp, num_rows="dynamic")
             if st.button("💾 更新員工資料庫"): conn.update(worksheet=EMP_SHEET, data=e_emp); st.cache_data.clear()
-        else: st.dataframe(df_emp[df_emp['店別'] == shop])
 
 if __name__ == "__main__":
     main()
