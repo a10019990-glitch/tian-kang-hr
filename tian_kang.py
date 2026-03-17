@@ -43,7 +43,6 @@ def robust_clean(df, expected_cols=None):
     return df
 
 def generate_bank_csv(df_source, df_employee, target_m):
-    # 確保合併時不噴錯
     emp_subset = df_employee[['姓名', '身分證', '收款帳號']].drop_duplicates('姓名')
     f_df = df_source.merge(emp_subset, on='姓名', how='left')
     bank = pd.DataFrame({
@@ -62,7 +61,7 @@ def main():
     if st.sidebar.button("🔄 刷新雲端資料"):
         st.cache_data.clear(); st.rerun()
 
-    # --- 定義結構 ---
+    # --- 定義獎金結構 ---
     PHARMACY_VAR = ['職務加給', '店毛利成長獎金', '推廣獎金', '輔具推廣獎金', '慢籤成長獎金', '加班津貼']
     CASE_MGR_VAR = ['電訪', '超額電訪', '家訪', '超額家訪', '三節獎金', '輔具獎金', '加班津貼']
     ALL_VAR_COLS = list(set(PHARMACY_VAR + CASE_MGR_VAR))
@@ -76,7 +75,7 @@ def main():
     except Exception as e:
         st.error(f"❌ 雲端資料庫讀取失敗: {e}"); st.stop()
 
-    # --- 登入控制 (維持原有邏輯) ---
+    # --- 登入控制 ---
     if 'auth' not in st.session_state:
         mode = st.radio("入口選擇", ["管理端登入", "員工查詢", "新帳號註冊"], horizontal=True)
         if mode == "管理端登入":
@@ -97,61 +96,63 @@ def main():
     tabs = st.tabs(["💰 薪資發薪作業", "👤 員工資料庫", "🏥 勞健保紀錄", "🔑 帳號管理"])
     
     with tabs[0]:
+        # --- 老闆專屬管理功能 ---
         if role == 1:
-            with st.sidebar.expander("➕ [管理] 建立新月份"):
-                nm = st.text_input("新月份", "2026-04")
+            with st.sidebar.expander("🛠️ 月份名單管理"):
+                # A. 建立新月份
+                st.subheader("➕ 建立新月份")
+                nm = st.text_input("輸入新月份 (如 2026-05)", "2026-05")
                 if st.button("執行建立"):
-                    # --- 安全的備註繼承邏輯 ---
-                    initial_remarks = [""] * len(df_emp) # 預設全空白
-                    
+                    initial_remarks = [""] * len(df_emp)
                     if not df_pay.empty and "備註" in df_pay.columns:
                         try:
-                            # 抓取最新備註並清理重複名單
                             latest_rem = df_pay.sort_values(['姓名','月份'], ascending=[True,False]).drop_duplicates('姓名')[['姓名','備註']]
                             df_t = df_emp[['姓名']].merge(latest_rem, on='姓名', how='left')
-                            if "備註" in df_t.columns:
-                                initial_remarks = df_t["備註"].fillna("").tolist()
-                        except:
-                            pass # 發生任何意外就維持空白
-
-                    new_r = pd.DataFrame({
-                        "月份": [nm] * len(df_emp),
-                        "店別": df_emp["店別"],
-                        "姓名": df_emp["姓名"],
-                        "備註": initial_remarks
-                    })
+                            initial_remarks = df_t["備註"].fillna("").tolist()
+                        except: pass
+                    new_r = pd.DataFrame({"月份":[nm]*len(df_emp), "店別":df_emp["店別"], "姓名":df_emp["姓名"], "備註":initial_remarks})
                     for c in ALL_VAR_COLS: new_r[c] = 0
-                    
                     conn.update(worksheet=PAY_SHEET, data=pd.concat([df_pay, new_r], ignore_index=True))
                     st.cache_data.clear(); st.success(f"✅ {nm} 建立成功"); st.rerun()
+                
+                st.markdown("---")
+                
+                # B. 【新功能】刪除月份
+                st.subheader("🗑️ 刪除月份資料")
+                if not df_pay.empty:
+                    all_months = sorted(df_pay['月份'].unique().tolist(), reverse=True)
+                    del_month = st.selectbox("選擇要刪除的月份", all_months, key="del_select")
+                    st.warning(f"警告：刪除 {del_month} 後將無法復原。")
+                    confirm_del = st.checkbox(f"我確認要刪除 {del_month} 的所有薪資紀錄")
+                    if st.button("🔥 執行刪除", type="secondary") and confirm_del:
+                        # 排除掉該月份的資料
+                        df_remaining = df_pay[df_pay['月份'] != del_month]
+                        conn.update(worksheet=PAY_SHEET, data=df_remaining)
+                        st.cache_data.clear(); st.success(f"🗑️ {del_month} 資料已刪除"); st.rerun()
+                else:
+                    st.write("目前無可刪除的月份。")
 
-        target_m = st.sidebar.selectbox("月份", sorted(df_pay['月份'].unique().tolist(), reverse=True) if not df_pay.empty else ["無資料"])
+        # --- 薪資編輯與計算 ---
+        target_m = st.sidebar.selectbox("月份切換", sorted(df_pay['月份'].unique().tolist(), reverse=True) if not df_pay.empty else ["無資料"])
         
-        if target_m == "無資料":
-            st.info("請先在左側建立新月份資料。")
-        else:
+        if target_m != "無資料":
             curr = df_pay[df_pay['月份'] == target_m].copy()
             if role == 3: curr = curr[curr['店別'] == shop]
 
-            # 核心計算
+            # 核心計算 (含勞健保歷史溯源)
             df_s = df_ins[df_ins['月份'] <= target_m].sort_values(['姓名', '月份'], ascending=[True, False])
             l_ins = df_s.drop_duplicates('姓名')[['姓名', '勞健保自負額']]
-            
-            # 合併員工資訊
             curr = curr.merge(df_emp[['姓名','單位','基本薪資合計','執照津貼','車資補貼']], on='姓名', how='left')
             curr = curr.merge(l_ins, on='姓名', how='left')
             
             num_cols = ALL_VAR_COLS + ['基本薪資合計', '執照津貼', '車資補貼', '勞健保自負額']
             for c in num_cols: curr[c] = pd.to_numeric(curr[c], errors='coerce').fillna(0)
-            
-            # 計算應付金額
             curr['應付金額'] = (curr['基本薪資合計'] + curr['執照津貼'] + curr['車資補貼'] + curr[ALL_VAR_COLS].sum(axis=1)) - curr['勞健保自負額']
 
             st.subheader(f"📅 {target_m} 薪資編輯")
             
             unit_filter = st.radio("篩選單位顯示", ["全部", "藥局", "個管師"], horizontal=True)
             display_df = curr.copy()
-            
             if unit_filter != "全部":
                 display_df = display_df[display_df['單位'] == unit_filter]
                 active_vars = PHARMACY_VAR if unit_filter == "藥局" else CASE_MGR_VAR
@@ -164,11 +165,9 @@ def main():
 
             if st.button("💾 同步薪資存檔"):
                 save_cols = ["月份", "店別", "姓名", "備註"] + ALL_VAR_COLS
-                # 確保只存有在編輯器中出現的列
                 save_df = edited[[c for c in save_cols if c in edited.columns]]
                 others = df_pay[~((df_pay['月份']==target_m) & (df_pay['姓名'].isin(edited['姓名'])))]
-                conn.update(worksheet=PAY_SHEET, data=pd.concat([others, save_df], ignore_index=True))
-                st.cache_data.clear(); st.success("已存檔")
+                conn.update(worksheet=PAY_SHEET, data=pd.concat([others, save_df], ignore_index=True)); st.cache_data.clear(); st.success("已存檔")
 
             if role == 1:
                 st.markdown("---")
@@ -180,7 +179,7 @@ def main():
                     df_cm = curr[curr['單位'] == '個管師']
                     if not df_cm.empty: st.download_button("📥 下載【個管師】網銀檔", generate_bank_csv(df_cm, df_emp, target_m), f"CaseManager_{target_m}.csv", use_container_width=True)
 
-    with tabs[1]: # 員工資料同步
+    with tabs[1]: # 員工資料
         if role == 1:
             e_emp = st.data_editor(df_emp, num_rows="dynamic")
             if st.button("💾 更新員工資料庫"): conn.update(worksheet=EMP_SHEET, data=e_emp); st.cache_data.clear(); st.success("更新成功")
