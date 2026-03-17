@@ -36,7 +36,6 @@ def robust_clean(df, expected_cols=None):
                 df[col] = 0 if any(x in col for x in ["獎金", "津貼", "合計", "補貼", "訪", "負擔", "勞保", "健保", "人數"]) else ""
     return df.loc[:, ~df.columns.duplicated()]
 
-# 💡 網銀格式：附言與付款性質改為「轉帳存入」
 def generate_bank_csv(df_source, df_employee, target_m):
     emp_sub = df_employee[['姓名', '身分證', '收款帳號']].drop_duplicates('姓名')
     f_df = df_source.merge(emp_sub, on='姓名', how='left')
@@ -130,13 +129,16 @@ def main():
                 st.dataframe(df_view.sort_values("店別"))
 
         else: # 老闆 (1) 與 店長 (3)
-            # 【核心修正】：店長不顯示「帳號管理」標籤
-            admin_tabs = ["💰 薪資發薪作業", "👤 員工資料庫", "🏥 勞健保紀錄檢視"]
-            if role == 1: admin_tabs.append("🔑 帳號管理")
+            # 【分頁邏輯精確分流】
+            if role == 1:
+                tab_titles = ["💰 薪資發薪作業", "👤 員工資料庫", "🏥 勞健保紀錄檢視", "🔑 帳號管理"]
+            else: # 店長
+                tab_titles = ["💰 薪資發薪作業", "🏥 勞健保紀錄檢視"]
             
-            tabs = st.tabs(admin_tabs)
+            tabs = st.tabs(tab_titles)
             
-            with tabs[0]: # 薪資作業
+            # --- 分頁 0: 薪資作業 (老闆與店長共有) ---
+            with tabs[0]:
                 if role == 1:
                     with st.sidebar.expander("🛠️ 月份管理"):
                         nm = st.text_input("建立新月份", "2026-06")
@@ -181,7 +183,7 @@ def main():
                             base_info = ["基本薪資合計"] if unit_f == "藥局" else ["基本薪資合計", "執照津貼", "車資補貼"]
                             cols = ["月份", "店別", "姓名"] + base_info + active_vars + ["勞健保個人負擔", "應付金額", "備註"]
                             display_df = display_df[[c for c in cols if c in display_df.columns]]
-                    else:
+                    else: # 店長
                         display_df = curr.copy()
                         unit_type = "藥局" if not display_df.empty and str(display_df.iloc[0]['單位']).strip() == "藥局" else "個管師"
                         active_vars = PHARMACY_VAR if unit_type == "藥局" else CASE_MGR_VAR
@@ -208,19 +210,15 @@ def main():
                             df_cm = curr[curr['單位'] == "個管師"]
                             if not df_cm.empty: st.download_button("📥 個管師網銀檔", generate_bank_csv(df_cm, df_emp, target_m), f"Case_{target_m}.csv")
 
-            with tabs[1]: # 員工資料
-                if role == 1:
+            # --- 分頁切換邏輯 ---
+            if role == 1:
+                with tabs[1]: # 員工資料
                     e_emp = st.data_editor(df_emp, num_rows="dynamic")
                     if st.button("💾 更新員工資料庫"): conn.update(worksheet=EMP_SHEET, data=e_emp); st.cache_data.clear()
-                else: 
-                    df_emp['店別_對齊'] = df_emp['店別'].apply(lambda x: str(x).zfill(2))
-                    st.dataframe(df_emp[df_emp['店別_對齊'] == shop])
-            
-            with tabs[2]: st.dataframe(df_ins[INS_COLS].sort_values(['姓名', '生效月份'], ascending=[True, False]))
-            
-            # 【關鍵】：只有老闆能進 tabs[3]
-            if role == 1:
+                with tabs[2]: st.dataframe(df_ins[INS_COLS].sort_values(['姓名', '生效月份'], ascending=[True, False]))
                 with tabs[3]: st.dataframe(df_acc[["姓名", "帳號", "身分證"]])
+            else: # 店長只剩這一個分頁 (原 tabs[2] 變 tabs[1])
+                with tabs[1]: st.dataframe(df_ins[INS_COLS].sort_values(['姓名', '生效月份'], ascending=[True, False]))
 
 if __name__ == "__main__":
     main()
