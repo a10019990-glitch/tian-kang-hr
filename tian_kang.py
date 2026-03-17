@@ -36,19 +36,14 @@ def robust_clean(df, expected_cols=None):
                 df[col] = 0 if any(x in col for x in ["獎金", "津貼", "合計", "補貼", "訪", "負擔", "勞保", "健保", "人數"]) else ""
     return df.loc[:, ~df.columns.duplicated()]
 
+# 💡 網銀格式保全：附言與付款性質為「轉帳存入」
 def generate_bank_csv(df_source, df_employee, target_m):
     emp_sub = df_employee[['姓名', '身分證', '收款帳號']].drop_duplicates('姓名')
     f_df = df_source.merge(emp_sub, on='姓名', how='left')
     bank = pd.DataFrame({
-        "付款日期": datetime.now().strftime("%Y%m%d"), 
-        "轉帳項目": "901", 
-        "企業編號": "75440263",
-        "員工姓名": f_df["姓名"], 
-        "身分證字號": f_df["身分證"], 
-        "收款帳號": f_df["收款帳號"],
-        "交易金額": f_df["應付金額"], 
-        "附言": "轉帳存入", 
-        "付款性質": "轉帳存入"
+        "付款日期": datetime.now().strftime("%Y%m%d"), "轉帳項目": "901", "企業編號": "75440263",
+        "員工姓名": f_df["姓名"], "身分證字號": f_df["身分證"], "收款帳號": f_df["收款帳號"],
+        "交易金額": f_df["應付金額"], "附言": "轉帳存入", "付款性質": "轉帳存入"
     })
     return bank.to_csv(index=False).encode('utf-8-sig')
 
@@ -70,7 +65,7 @@ def main():
         df_ins = robust_clean(conn.read(worksheet=INS_SHEET, ttl=300), expected_cols=INS_COLS)
         df_acc = robust_clean(conn.read(worksheet=ACC_SHEET, ttl=300))
     except Exception as e:
-        st.error(f"❌ 雲端讀取失敗: {e}"); st.stop()
+        st.error(f"❌ 雲端連線失敗: {e}"); st.stop()
 
     if 'auth' not in st.session_state:
         mode = st.radio("入口選擇", ["管理端登入", "員工薪資查詢", "新帳號註冊"], horizontal=True)
@@ -117,7 +112,7 @@ def main():
         st.sidebar.success(f"📍 權限：{shop}")
         if st.sidebar.button("登出系統"): del st.session_state['auth']; st.rerun()
 
-        if role == 4: # 會計
+        if role == 4: # 會計 (維持 8 欄位 + 排序修正)
             t_acct = st.tabs(["🏥 勞健保明細維護", "👤 全體員工名單"])
             with t_acct[0]:
                 e_ins = st.data_editor(df_ins[INS_COLS], num_rows="dynamic", key="acct_edit")
@@ -128,20 +123,19 @@ def main():
                 df_view['店別'] = df_view['店別'].astype(str)
                 st.dataframe(df_view.sort_values("店別"))
 
-        else: # 老闆 (1) 與 店長 (3)
-            # 【分頁邏輯精確分流】
+        else: # 老闆 與 店長
+            # 【分頁精確分流：店長不分頁】
             if role == 1:
                 tab_titles = ["💰 薪資發薪作業", "👤 員工資料庫", "🏥 勞健保紀錄檢視", "🔑 帳號管理"]
-            else: # 店長
-                tab_titles = ["💰 薪資發薪作業", "🏥 勞健保紀錄檢視"]
+            else: # 店長只剩發薪
+                tab_titles = ["💰 薪資發薪作業"]
             
             tabs = st.tabs(tab_titles)
             
-            # --- 分頁 0: 薪資作業 (老闆與店長共有) ---
-            with tabs[0]:
+            with tabs[0]: # 薪資作業
                 if role == 1:
                     with st.sidebar.expander("🛠️ 月份管理"):
-                        nm = st.text_input("建立新月份", "2026-06")
+                        nm = st.text_input("建立月份", "2026-06")
                         if st.button("執行建立"):
                             latest_rem = df_pay.sort_values(['姓名','月份'], ascending=[True,False]).drop_duplicates('姓名')[['姓名','備註']] if not df_pay.empty else pd.DataFrame(columns=['姓名','備註'])
                             df_t = df_emp[['姓名']].merge(latest_rem, on='姓名', how='left')
@@ -152,8 +146,8 @@ def main():
                         all_m_safe = sorted([str(m) for m in all_m_raw if str(m).strip() != ""], reverse=True)
                         if all_m_safe:
                             st.markdown("---")
-                            del_m = st.selectbox("選擇刪除月份", all_m_safe, key="del_selector")
-                            if st.button("🔥 執行永久刪除") and st.checkbox(f"我確認要刪除 {del_m}"):
+                            del_m = st.selectbox("刪除月份", all_m_safe, key="del_selector")
+                            if st.button("🔥 刪除") and st.checkbox(f"我確認要刪除 {del_m}"):
                                 conn.update(worksheet=PAY_SHEET, data=df_pay[df_pay['月份'].astype(str) != del_m]); st.cache_data.clear(); st.rerun()
 
                 target_m = st.sidebar.selectbox("月份切換", sorted([str(m) for m in df_pay['月份'].dropna().unique()], reverse=True) if not df_pay.empty else ["無"], key="target_box")
@@ -183,7 +177,7 @@ def main():
                             base_info = ["基本薪資合計"] if unit_f == "藥局" else ["基本薪資合計", "執照津貼", "車資補貼"]
                             cols = ["月份", "店別", "姓名"] + base_info + active_vars + ["勞健保個人負擔", "應付金額", "備註"]
                             display_df = display_df[[c for c in cols if c in display_df.columns]]
-                    else: # 店長
+                    else: # 店長 (隱藏敏感資訊)
                         display_df = curr.copy()
                         unit_type = "藥局" if not display_df.empty and str(display_df.iloc[0]['單位']).strip() == "藥局" else "個管師"
                         active_vars = PHARMACY_VAR if unit_type == "藥局" else CASE_MGR_VAR
@@ -198,7 +192,7 @@ def main():
                             for col in edited.columns:
                                 if col in ALL_VAR_COLS or col == "備註":
                                     df_pay.loc[(df_pay['月份'].astype(str) == target_m) & (df_pay['姓名'] == target_name), col] = row[col]
-                        conn.update(worksheet=PAY_SHEET, data=df_pay); st.cache_data.clear(); st.success("已存檔")
+                        conn.update(worksheet=PAY_SHEET, data=df_pay); st.cache_data.clear(); st.success("存檔成功")
 
                     if role == 1:
                         st.markdown("---")
@@ -210,15 +204,13 @@ def main():
                             df_cm = curr[curr['單位'] == "個管師"]
                             if not df_cm.empty: st.download_button("📥 個管師網銀檔", generate_bank_csv(df_cm, df_emp, target_m), f"Case_{target_m}.csv")
 
-            # --- 分頁切換邏輯 ---
+            # --- 老闆專屬分頁內容 ---
             if role == 1:
                 with tabs[1]: # 員工資料
                     e_emp = st.data_editor(df_emp, num_rows="dynamic")
                     if st.button("💾 更新員工資料庫"): conn.update(worksheet=EMP_SHEET, data=e_emp); st.cache_data.clear()
                 with tabs[2]: st.dataframe(df_ins[INS_COLS].sort_values(['姓名', '生效月份'], ascending=[True, False]))
                 with tabs[3]: st.dataframe(df_acc[["姓名", "帳號", "身分證"]])
-            else: # 店長只剩這一個分頁 (原 tabs[2] 變 tabs[1])
-                with tabs[1]: st.dataframe(df_ins[INS_COLS].sort_values(['姓名', '生效月份'], ascending=[True, False]))
 
 if __name__ == "__main__":
     main()
