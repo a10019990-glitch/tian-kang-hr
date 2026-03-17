@@ -5,7 +5,7 @@ from datetime import datetime
 import re
 import hashlib
 
-# --- 1. 雲端設定 ---
+# --- 1. 雲端分頁名稱設定 ---
 SHEET_ID = "1TcrNfnSKj7hMd0LOXipBD9eKAft6yU7YnhZNX6rtPhg"
 PAY_SHEET = "salary_data"
 EMP_SHEET = "emp_info"
@@ -14,7 +14,7 @@ ACC_SHEET = "user_accounts"
 
 st.set_page_config(page_title="天康藥局雲端管理系統", layout="wide")
 
-# --- 2. 核心工具 ---
+# --- 2. 核心工具函數 ---
 def hash_password(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
@@ -22,11 +22,8 @@ def robust_clean(df, expected_cols=None):
     if df is None or df.empty: return pd.DataFrame(columns=expected_cols if expected_cols else [])
     df.columns = [str(c).strip().replace('\n', '') for c in df.columns]
     
-    # 💡 修正映射邏輯：保留「月份」與「生效月份」的獨立性
     mapping = {
-        "月份": "月份", 
-        "生效月份": "生效月份", 
-        "姓名": "姓名", "身分證": "身分證",
+        "月份": "月份", "生效月份": "生效月份", "姓名": "姓名", "身分證": "身分證",
         "勞保": "勞保", "健保": "健保", "健保人數": "健保人數",
         "勞健保個人負擔": "勞健保個人負擔", "加保日期": "加保日期",
         "單位": "單位", "店別": "店別", "基本薪資合計": "基本薪資合計",
@@ -68,21 +65,20 @@ def main():
     if st.sidebar.button("🔄 刷新雲端資料"):
         st.cache_data.clear(); st.rerun()
 
-    # --- 定義欄位結構 ---
+    # --- 獎金結構 ---
     PHARMACY_VAR = ['職務加給', '店毛利成長獎金', '推廣獎金', '輔具推廣獎金', '慢籤成長獎金', '加班津貼']
     CASE_MGR_VAR = ['電訪', '超額電訪', '家訪', '超額家訪', '三節獎金', '輔具獎金', '加班津貼']
     ALL_VAR_COLS = list(set(PHARMACY_VAR + CASE_MGR_VAR))
-    # 會計要求的 8 個欄位
     INS_COLS = ['生效月份', '姓名', '身分證', '勞保', '健保', '健保人數', '勞健保個人負擔', '加保日期']
 
-    # --- 3. 讀取資料 ---
+    # --- 3. 讀取與安全性處理 ---
     try:
         df_emp = robust_clean(conn.read(worksheet=EMP_SHEET, ttl=300), expected_cols=['姓名', '單位', '店別', '身分證', '收款帳號', '基本薪資合計', '執照津貼', '車資補貼'])
         df_pay = robust_clean(conn.read(worksheet=PAY_SHEET, ttl=300), expected_cols=['月份', '店別', '姓名', '備註'] + ALL_VAR_COLS)
         df_ins = robust_clean(conn.read(worksheet=INS_SHEET, ttl=300), expected_cols=INS_COLS)
         df_acc = robust_clean(conn.read(worksheet=ACC_SHEET, ttl=300))
     except Exception as e:
-        st.error(f"❌ 雲端讀取失敗: {e}"); st.stop()
+        st.error(f"❌ 雲端連線失敗: {e}"); st.stop()
 
     # --- 4. 登入系統 ---
     if 'auth' not in st.session_state:
@@ -104,17 +100,8 @@ def main():
                 if not match.empty:
                     st.session_state.auth, st.session_state.user_name, st.session_state.shop = 5, match.iloc[0]['姓名'], "PERSONAL"
                     st.rerun()
-        elif mode == "新帳號註冊":
-            with st.form("reg"):
-                n, i, a, p = st.text_input("姓名"), st.text_input("身分證"), st.text_input("帳號"), st.text_input("密碼", type="password")
-                if st.form_submit_button("註冊"):
-                    if a in ["boss", "acct"] or a.startswith("mgr_") or not df_emp[(df_emp['姓名']==n) & (df_emp['身分證']==i)].empty:
-                        new_u = pd.DataFrame({"姓名":[n], "身分證":[i], "帳號":[a], "密碼":[hash_password(p)]})
-                        conn.update(worksheet=ACC_SHEET, data=pd.concat([df_acc, new_u], ignore_index=True))
-                        st.cache_data.clear(); st.success("註冊成功")
         return
 
-    # --- 5. 權限分流 ---
     role, shop = st.session_state.auth, st.session_state.shop
 
     if role == 5: # 員工專區
@@ -125,8 +112,7 @@ def main():
         st.sidebar.success(f"📍 權限：{shop}")
         if st.sidebar.button("登出系統"): del st.session_state['auth']; st.rerun()
 
-        # 會計 (Role 4) - 專屬 8 欄位
-        if role == 4:
+        if role == 4: # 會計 (專屬 8 欄位)
             t_acct = st.tabs(["🏥 勞健保明細維護", "👤 全體員工名單"])
             with t_acct[0]:
                 e_ins = st.data_editor(df_ins[INS_COLS], num_rows="dynamic", key="acct_edit")
@@ -148,19 +134,26 @@ def main():
                             new_r = pd.DataFrame({"月份":[nm]*len(df_emp), "店別":df_emp["店別"], "姓名":df_emp["姓名"], "備註":df_t["備註"].fillna("").tolist()})
                             for c in ALL_VAR_COLS: new_r[c] = 0
                             conn.update(worksheet=PAY_SHEET, data=pd.concat([df_pay, new_r], ignore_index=True)); st.cache_data.clear(); st.rerun()
-                        all_m = sorted(df_pay['月份'].unique().tolist(), reverse=True) if not df_pay.empty else []
-                        if all_m:
+                        
+                        # 💡 修正排序崩潰點：加入 str() 與過濾空值
+                        all_months_raw = df_pay['月份'].dropna().unique().tolist()
+                        all_months_safe = sorted([str(m) for m in all_months_raw], reverse=True)
+                        
+                        if all_months_safe:
                             st.markdown("---")
-                            del_m = st.selectbox("刪除月份", all_m)
+                            del_m = st.selectbox("刪除月份", all_months_safe, key="del_box")
                             if st.button("🔥 刪除") and st.checkbox(f"我確認要刪除 {del_m}"):
                                 conn.update(worksheet=PAY_SHEET, data=df_pay[df_pay['月份'] != del_m]); st.cache_data.clear(); st.rerun()
 
-                target_m = st.sidebar.selectbox("月份切換", sorted(df_pay['月份'].unique().tolist(), reverse=True) if not df_pay.empty else ["無"])
+                # 💡 月份切換下拉選單安全性處理
+                all_months_raw = df_pay['月份'].dropna().unique().tolist()
+                all_months_safe = sorted([str(m) for m in all_months_raw], reverse=True)
+                target_m = st.sidebar.selectbox("月份切換", all_months_safe if all_months_safe else ["無"], key="target_box")
+                
                 if target_m != "無":
-                    # 計算邏輯：用「月份」去對應勞健保表的「生效月份」
-                    df_s = df_ins[df_ins['生效月份'] <= target_m].sort_values(['姓名', '生效月份'], ascending=[True, False])
+                    df_s = df_ins[df_ins['生效月份'].astype(str) <= target_m].sort_values(['姓名', '生效月份'], ascending=[True, False])
                     l_ins = df_s.drop_duplicates('姓名')[['姓名', '勞健保個人負擔']]
-                    curr = df_pay[df_pay['月份'] == target_m].copy()
+                    curr = df_pay[df_pay['月份'].astype(str) == target_m].copy()
                     if role == 3: curr = curr[curr['店別'] == shop]
                     
                     emp_info = df_emp[['姓名','單位','基本薪資合計','執照津貼','車資補貼']].drop_duplicates('姓名')
@@ -184,11 +177,11 @@ def main():
                     display_df = display_df.loc[:, ~display_df.columns.duplicated()]
                     edited = st.data_editor(display_df, key="main_edit", num_rows="dynamic")
                     
-                    if st.button("💾 同步存檔"):
+                    if st.button("💾 同步薪資存檔"):
                         save_cols = ["月份", "店別", "姓名", "備註"] + ALL_VAR_COLS
                         save_df = edited[[c for c in save_cols if c in edited.columns]]
-                        others = df_pay[~((df_pay['月份']==target_m) & (df_pay['姓名'].isin(edited['姓名'])))]
-                        conn.update(worksheet=PAY_SHEET, data=pd.concat([others, save_df], ignore_index=True)); st.cache_data.clear(); st.success("存檔成功")
+                        others = df_pay[~((df_pay['月份'].astype(str)==target_m) & (df_pay['姓名'].isin(edited['姓名'])))]
+                        conn.update(worksheet=PAY_SHEET, data=pd.concat([others, save_df], ignore_index=True)); st.cache_data.clear(); st.success("已存檔")
 
                     if role == 1:
                         st.markdown("---")
