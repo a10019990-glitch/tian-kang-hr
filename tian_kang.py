@@ -55,7 +55,7 @@ def generate_bank_csv(df_source, df_employee, target_m):
     return bank.to_csv(index=False).encode('utf-8-sig')
 
 def main():
-    st.title("🚀 天康連鎖藥局 - 雙單位發薪管理系統")
+    st.title("🚀 天康連鎖藥局 - 薪資與勞健保管理系統")
     conn = st.connection("gsheets", type=GSheetsConnection)
 
     if st.sidebar.button("🔄 刷新雲端資料"):
@@ -74,100 +74,89 @@ def main():
     except Exception as e:
         st.error(f"❌ 雲端資料庫讀取失敗: {e}"); st.stop()
 
-    # --- 4. 登入系統 (核心修正：確保每個路徑都定義 shop) ---
+    # --- 4. 登入系統 ---
     if 'auth' not in st.session_state:
         mode = st.radio("入口選擇", ["管理端登入", "員工薪資查詢", "新帳號註冊"], horizontal=True)
-        
         if mode == "管理端登入":
-            acc = st.text_input("管理帳號")
-            pw = st.text_input("管理密碼", type="password")
-            if st.button("驗證進入後台"):
+            acc = st.text_input("管理帳號"); pw = st.text_input("管理密碼", type="password")
+            if st.button("登入後台"):
                 match = df_acc[(df_acc['帳號'] == acc) & (df_acc['密碼'] == hash_password(pw))]
                 if not match.empty:
-                    if acc == "boss": 
-                        st.session_state.auth, st.session_state.shop = 1, "ALL"
-                    elif acc == "acct": 
-                        st.session_state.auth, st.session_state.shop = 4, "ACCOUNTING"
-                    elif acc.startswith("mgr_"): 
-                        st.session_state.auth, st.session_state.shop = 3, re.findall(r'\d+', acc)[0].zfill(2)
+                    if acc == "boss": st.session_state.auth, st.session_state.shop = 1, "ALL"
+                    elif acc == "acct": st.session_state.auth, st.session_state.shop = 4, "ACCOUNTING"
+                    elif acc.startswith("mgr_"): st.session_state.auth, st.session_state.shop = 3, re.findall(r'\d+', acc)[0].zfill(2)
                     st.rerun()
-                else: st.error("❌ 帳號或密碼錯誤")
-
+                else: st.error("❌ 帳號密碼錯誤")
         elif mode == "員工薪資查詢":
-            e_acc = st.text_input("員工帳號")
-            e_pw = st.text_input("員工密碼", type="password")
-            if st.button("登入查詢"):
+            e_acc = st.text_input("帳號"); e_pw = st.text_input("密碼", type="password")
+            if st.button("登入"):
                 match = df_acc[(df_acc['帳號'] == e_acc) & (df_acc['密碼'] == hash_password(e_pw))]
                 if not match.empty:
-                    # 【核心修正】員工登入也設定一個預設的 shop 避免報錯
-                    st.session_state.auth = 5
-                    st.session_state.user_name = match.iloc[0]['姓名']
-                    st.session_state.shop = "PERSONAL" 
+                    st.session_state.auth, st.session_state.user_name, st.session_state.shop = 5, match.iloc[0]['姓名'], "PERSONAL"
                     st.rerun()
-                else: st.error("❌ 帳號或密碼錯誤")
-
         elif mode == "新帳號註冊":
-            with st.form("reg_form"):
-                reg_name, reg_id = st.text_input("姓名"), st.text_input("身分證字號")
-                reg_acc, reg_pw = st.text_input("自訂登入帳號"), st.text_input("自訂登入密碼", type="password")
-                if st.form_submit_button("完成註冊"):
-                    is_admin = reg_acc in ["boss", "acct"] or reg_acc.startswith("mgr_")
-                    is_valid_emp = not df_emp[(df_emp['姓名'] == reg_name) & (df_emp['身分證'] == reg_id)].empty
-                    if is_admin or is_valid_emp:
-                        new_u = pd.DataFrame({"姓名":[reg_name], "身分證":[reg_id], "帳號":[reg_acc], "密碼":[hash_password(reg_pw)]})
+            with st.form("reg"):
+                n, i, a, p = st.text_input("姓名"), st.text_input("身分證"), st.text_input("帳號"), st.text_input("密碼", type="password")
+                if st.form_submit_button("註冊"):
+                    if a in ["boss", "acct"] or a.startswith("mgr_") or not df_emp[(df_emp['姓名']==n) & (df_emp['身分證']==i)].empty:
+                        new_u = pd.DataFrame({"姓名":[n], "身分證":[i], "帳號":[a], "密碼":[hash_password(p)]})
                         conn.update(worksheet=ACC_SHEET, data=pd.concat([df_acc, new_u], ignore_index=True))
-                        st.cache_data.clear(); st.success("✅ 註冊成功！")
-                    else: st.error("❌ 驗證失敗")
+                        st.cache_data.clear(); st.success("註冊成功")
         return
 
     # --- 5. 權限分流 ---
     role = st.session_state.auth
-    shop = st.session_state.shop # 現在這行絕對不會報錯了
+    shop = st.session_state.shop
 
-    if role == 5: # 員工視角
-        name = st.session_state.user_name
-        st.subheader(f"👋 {name}，歡迎使用薪資查詢系統")
-        p_pay = df_pay[df_pay['姓名'] == name].copy()
-        if not p_pay.empty:
-            st.dataframe(p_pay)
-        else: st.warning("尚未有您的發薪紀錄")
+    if role == 5: # 員工專區
+        st.subheader(f"👋 {st.session_state.user_name}，個人薪資明細")
+        st.dataframe(df_pay[df_pay['姓名'] == st.session_state.user_name])
         if st.sidebar.button("登出"): del st.session_state['auth']; st.rerun()
 
-    else: # 管理端
+    else: # 管理端 (老闆/店長/會計)
         st.sidebar.success(f"📍 當前權限：{shop}")
         if st.sidebar.button("登出系統"): del st.session_state['auth']; st.rerun()
 
-        if role == 4: # 會計
-            tabs = st.tabs(["🏥 勞健保紀錄管理", "👤 員工對照名單"])
-            with tabs[0]:
-                e_ins = st.data_editor(df_ins, num_rows="dynamic")
-                if st.button("💾 同步勞健保紀錄"): conn.update(worksheet=INS_SHEET, data=e_ins); st.cache_data.clear()
-        
-        else: # 老闆與店長
-            tabs = st.tabs(["💰 薪資發薪作業", "👤 員工資料庫", "🏥 勞健保紀錄", "🔑 帳號管理"])
+        # 【核心修正】會計帳號專屬分頁
+        if role == 4:
+            t_acct = st.tabs(["🏥 勞健保紀錄管理", "👤 全體員工對照名單"])
+            with t_acct[0]:
+                st.subheader("🏥 勞健保自負額維護")
+                st.info("💡 提示：如有異動請點擊下方『+』新增一列，並填入生效月份與金額。")
+                e_ins = st.data_editor(df_ins, num_rows="dynamic", key="acct_ins_editor")
+                if st.button("💾 同步更新勞健保資料"):
+                    conn.update(worksheet=INS_SHEET, data=e_ins)
+                    st.cache_data.clear(); st.success("✅ 勞健保雲端資料已更新！")
+            with t_acct[1]:
+                st.subheader("👤 全體同仁名單")
+                # 確保會計能看到所有單位的姓名與店別，不被店長邏輯擋住
+                st.dataframe(df_emp[["店別", "姓名", "單位", "身分證"]].sort_values("店別"))
+
+        else: # 老闆 (Role 1) 與 店長 (Role 3)
+            tabs = st.tabs(["💰 薪資發薪作業", "👤 員工資料庫", "🏥 勞健保異動紀錄", "🔑 帳號管理"])
             
             with tabs[0]:
                 if role == 1:
                     with st.sidebar.expander("🛠️ 月份名單管理"):
                         nm = st.text_input("新月份 (如 2026-05)", "2026-05")
                         if st.button("執行建立"):
-                            initial_remarks = [""] * len(df_emp)
+                            initial_rem = [""] * len(df_emp)
                             if not df_pay.empty:
                                 try:
                                     latest_rem = df_pay.sort_values(['姓名','月份'], ascending=[True,False]).drop_duplicates('姓名')[['姓名','備註']]
                                     df_t = df_emp[['姓名']].merge(latest_rem, on='姓名', how='left')
-                                    initial_remarks = df_t["備註"].fillna("").tolist()
+                                    initial_rem = df_t["備註"].fillna("").tolist()
                                 except: pass
-                            new_r = pd.DataFrame({"月份":[nm]*len(df_emp), "店別":df_emp["店別"], "姓名":df_emp["姓名"], "備註":initial_remarks})
+                            new_r = pd.DataFrame({"月份":[nm]*len(df_emp), "店別":df_emp["店別"], "姓名":df_emp["姓名"], "備註":initial_rem})
                             for c in ALL_VAR_COLS: new_r[c] = 0
-                            conn.update(worksheet=PAY_SHEET, data=pd.concat([df_pay, new_r], ignore_index=True))
-                            st.cache_data.clear(); st.rerun()
+                            conn.update(worksheet=PAY_SHEET, data=pd.concat([df_pay, new_r], ignore_index=True)); st.cache_data.clear(); st.rerun()
 
-                target_m = st.sidebar.selectbox("切換月份", sorted(df_pay['月份'].unique().tolist(), reverse=True) if not df_pay.empty else ["無"])
+                target_m = st.sidebar.selectbox("月份切換", sorted(df_pay['月份'].unique().tolist(), reverse=True) if not df_pay.empty else ["無"])
                 if target_m != "無":
                     curr = df_pay[df_pay['月份'] == target_m].copy()
                     if role == 3: curr = curr[curr['店別'] == shop]
 
+                    # 計算邏輯 (自動抓取該月份最新的勞健保金額)
                     df_s = df_ins[df_ins['月份'] <= target_m].sort_values(['姓名', '月份'], ascending=[True, False])
                     l_ins = df_s.drop_duplicates('姓名')[['姓名', '勞健保自負額']]
                     curr = curr.merge(df_emp[['姓名','單位','基本薪資合計','執照津貼','車資補貼']], on='姓名', how='left')
@@ -177,8 +166,8 @@ def main():
                     for c in num_cols: curr[c] = pd.to_numeric(curr[c], errors='coerce').fillna(0)
                     curr['應付金額'] = (curr['基本薪資合計'] + curr['執照津貼'] + curr['車資補貼'] + curr[ALL_VAR_COLS].sum(axis=1)) - curr['勞健保自負額']
 
-                    st.subheader(f"📅 {target_m} 薪資編輯")
-                    unit_f = st.radio("篩選單位", ["全部", "藥局", "個管師"], horizontal=True)
+                    st.subheader(f"📅 {target_m} 薪資核對與編輯")
+                    unit_f = st.radio("顯示過濾", ["全部", "藥局", "個管師"], horizontal=True)
                     display_df = curr.copy()
                     if unit_f != "全部":
                         display_df = display_df[display_df['單位'] == unit_f]
@@ -188,13 +177,13 @@ def main():
                         if role != 1: cols = ["月份", "店別", "姓名"] + active_vars + ["備註"]
                         display_df = display_df[[c for c in cols if c in display_df.columns]]
 
-                    edited = st.data_editor(display_df, key="main_edit", num_rows="dynamic")
+                    edited = st.data_editor(display_df, key="main_edit_area", num_rows="dynamic")
 
                     if st.button("💾 同步薪資存檔"):
                         save_cols = ["月份", "店別", "姓名", "備註"] + ALL_VAR_COLS
                         save_df = edited[[c for c in save_cols if c in edited.columns]]
                         others = df_pay[~((df_pay['月份']==target_m) & (df_pay['姓名'].isin(edited['姓名'])))]
-                        conn.update(worksheet=PAY_SHEET, data=pd.concat([others, save_df], ignore_index=True)); st.cache_data.clear(); st.success("存檔成功")
+                        conn.update(worksheet=PAY_SHEET, data=pd.concat([others, save_df], ignore_index=True)); st.cache_data.clear(); st.success("薪資資料已存檔")
 
                     if role == 1:
                         st.markdown("---")
@@ -206,10 +195,14 @@ def main():
                             df_cm = curr[curr['單位'] == '個管師']
                             if not df_cm.empty: st.download_button("📥 下載【個管師】網銀檔", generate_bank_csv(df_cm, df_emp, target_m), f"CaseManager_{target_m}.csv")
 
-            with tabs[1]:
+            with tabs[1]: # 員工資料
                 if role == 1:
                     e_emp = st.data_editor(df_emp, num_rows="dynamic")
-                    if st.button("💾 更新員工資料庫"): conn.update(worksheet=EMP_SHEET, data=e_emp); st.cache_data.clear()
+                    if st.button("💾 同步更新員工主表"): conn.update(worksheet=EMP_SHEET, data=e_emp); st.cache_data.clear(); st.success("更新成功")
+                else: st.dataframe(df_emp[df_emp['店別'] == shop])
+            
+            with tabs[3]: # 帳號管理
+                st.dataframe(df_acc)
 
 if __name__ == "__main__":
     main()
