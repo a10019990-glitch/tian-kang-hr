@@ -37,7 +37,6 @@ def robust_clean(df, expected_cols=None):
                 df[col] = 0 if any(x in col for x in ["獎金", "津貼", "合計", "補貼", "訪", "負擔", "勞保", "健保", "人數"]) else ""
     return df.loc[:, ~df.columns.duplicated()]
 
-# 💡 網銀格式保全：轉帳存入
 def generate_bank_csv(df_source, df_employee, target_m):
     emp_sub = df_employee[['姓名', '身分證', '收款帳號']].drop_duplicates('姓名')
     f_df = df_source.merge(emp_sub, on='姓名', how='left')
@@ -49,18 +48,18 @@ def generate_bank_csv(df_source, df_employee, target_m):
     return bank.to_csv(index=False).encode('utf-8-sig')
 
 def main():
-    st.title("🚀 天康連鎖藥局")
+    st.title("🚀 天康連鎖藥局 - 薪資與勞健保管理系統")
     conn = st.connection("gsheets", type=GSheetsConnection)
 
     if st.sidebar.button("🔄 刷新雲端資料"):
         st.cache_data.clear(); st.rerun()
 
+    # --- 定義欄位結構 ---
     PHARMACY_VAR = ['職務加給', '店毛利成長獎金', '推廣獎金', '輔具推廣獎金', '慢籤成長獎金', '加班津貼']
     CASE_MGR_VAR = ['電訪', '超額電訪', '家訪', '超額家訪', '三節獎金', '輔具獎金', '加班津貼']
     ALL_VAR_COLS = list(set(PHARMACY_VAR + CASE_MGR_VAR))
     INS_COLS = ['生效月份', '姓名', '身分證', '勞保', '健保', '健保人數', '勞健保個人負擔', '加保日期']
 
-    # --- 3. 讀取資料 ---
     try:
         df_emp = robust_clean(conn.read(worksheet=EMP_SHEET, ttl=300), expected_cols=['姓名', '單位', '店別', '身分證', '收款帳號', '基本薪資合計', '執照津貼', '車資補貼'])
         df_pay = robust_clean(conn.read(worksheet=PAY_SHEET, ttl=300), expected_cols=['月份', '店別', '姓名', '備註'] + ALL_VAR_COLS)
@@ -73,7 +72,6 @@ def main():
     except Exception as e:
         st.error(f"❌ 雲端連線失敗: {e}"); st.stop()
 
-    # --- 4. 登入與註冊入口 ---
     if 'auth' not in st.session_state:
         mode = st.radio("入口選擇", ["管理端登入", "員工薪資查詢", "新帳號註冊"], horizontal=True)
         if mode == "管理端登入":
@@ -95,44 +93,61 @@ def main():
                 if not match.empty:
                     st.session_state.auth, st.session_state.user_name, st.session_state.shop = 5, match.iloc[0]['姓名'], "PERSONAL"
                     st.rerun()
-        # 💡 補回被刪掉的註冊功能
         elif mode == "新帳號註冊":
-            st.subheader("📝 建立新帳號")
             with st.form("reg_form"):
                 n, i, a, p = st.text_input("姓名"), st.text_input("身分證"), st.text_input("帳號"), st.text_input("密碼", type="password")
                 if st.form_submit_button("執行註冊"):
-                    if not n or not i or not a or not p:
-                        st.error("❌ 所有欄位均為必填")
-                    else:
-                        new_u = pd.DataFrame({"姓名":[n], "身分證":[i], "帳號":[a], "密碼":[hash_password(p)]})
-                        conn.update(worksheet=ACC_SHEET, data=pd.concat([df_acc, new_u], ignore_index=True))
-                        st.cache_data.clear(); st.success("🎉 註冊成功！請切換至登入入口。")
+                    new_u = pd.DataFrame({"姓名":[n], "身分證":[i], "帳號":[a], "密碼":[hash_password(p)]})
+                    conn.update(worksheet=ACC_SHEET, data=pd.concat([df_acc, new_u], ignore_index=True))
+                    st.cache_data.clear(); st.success("註冊成功")
         return
 
     role, shop = st.session_state.auth, st.session_state.shop
 
-    if role == 5: # 員工專區
+    # --- 【核心新增】：員工專區「全明細顯示」 ---
+    if role == 5:
         name = st.session_state.user_name
+        st.subheader(f"👋 {name}，您好！以下是您的完整薪資明細：")
         emp_match = df_emp[df_emp['姓名'] == name]
+        
         if not emp_match.empty:
             emp_info = emp_match.iloc[0]
             unit = str(emp_info['單位']).strip()
+            # 取得該員工發薪紀錄
             p_pay = df_pay[df_pay['姓名'] == name].copy()
+            # 聯動勞健保資料 (包含勞保、健保、人數明細)
             df_s = df_ins[df_ins['姓名'] == name].sort_values(['生效月份'], ascending=False)
-            p_pay = p_pay.merge(df_s[['生效月份', '勞健保個人負擔']], left_on='月份', right_on='生效月份', how='left')
-            for c in ALL_VAR_COLS + ['勞健保個人負擔', '基本薪資合計', '執照津貼', '車資補貼']:
-                if c in emp_info.index: p_pay[c] = emp_info[c]
+            p_pay = p_pay.merge(df_s[['生效月份', '勞保', '健保', '健保人數', '勞健保個人負擔']], left_on='月份', right_on='生效月份', how='left')
+            
+            # 數值轉換
+            p_pay['基本薪資合計'] = pd.to_numeric(emp_info['基本薪資合計'], errors='coerce').fillna(0)
+            p_pay['執照津貼'] = pd.to_numeric(emp_info['執照津貼'], errors='coerce').fillna(0)
+            p_pay['車資補貼'] = pd.to_numeric(emp_info['車資補貼'], errors='coerce').fillna(0)
+            for c in ALL_VAR_COLS + ['勞健保個人負擔']:
                 p_pay[c] = pd.to_numeric(p_pay[c], errors='coerce').fillna(0)
+            
+            # 計算實領總額
             bonus_cols = PHARMACY_VAR if unit == "藥局" else CASE_MGR_VAR
-            p_pay['實領總額'] = (p_pay['基本薪資合計'] + p_pay['執照津貼'] + p_pay['車資補貼'] + p_pay[bonus_cols].sum(axis=1)) - p_pay['勞健保個人負擔']
-            st.dataframe(p_pay[['月份', '姓名', '基本薪資合計', '實領總額', '備註']])
+            base_sum = p_pay['基本薪資合計'] + p_pay['執照津貼'] + p_pay['車資補貼']
+            p_pay['實領總額'] = (base_sum + p_pay[bonus_cols].sum(axis=1)) - p_pay['勞健保個人負擔']
+            
+            # 💡 員工看到的「全明細」欄位定義
+            if unit == "藥局":
+                disp_cols = ['月份', '姓名', '基本薪資合計'] + PHARMACY_VAR + ['勞保', '健保', '健保人數', '勞健保個人負擔', '實領總額', '備註']
+            else:
+                disp_cols = ['月份', '姓名', '基本薪資合計', '執照津貼', '車資補貼'] + CASE_MGR_VAR + ['勞保', '健保', '健保人數', '勞健保個人負擔', '實領總額', '備註']
+            
+            st.dataframe(p_pay[[c for c in disp_cols if c in p_pay.columns]])
+        else:
+            st.error("❌ 找不到員工基本資料。")
         if st.sidebar.button("登出"): del st.session_state['auth']; st.rerun()
 
     else:
+        # --- 管理端：老闆、會計、店長 (保持原有功能) ---
         st.sidebar.success(f"📍 權限：{shop}")
         if st.sidebar.button("登出系統"): del st.session_state['auth']; st.rerun()
 
-        if role == 4: # 會計 (維持 8 欄位)
+        if role == 4: # 會計權限
             t_acct = st.tabs(["🏥 勞健保明細維護", "👤 全體員工名單"])
             with t_acct[0]:
                 e_ins = st.data_editor(df_ins[INS_COLS], num_rows="dynamic", key="acct_edit")
@@ -143,7 +158,7 @@ def main():
                 df_view['店別'] = df_view['店別'].astype(str)
                 st.dataframe(df_view.sort_values("店別"))
 
-        else: # 老闆 (1) 與 店長 (3)
+        else: # 老闆 (Role 1) 與 店長 (Role 3)
             tab_titles = ["💰 薪資發薪作業", "👤 員工資料庫", "🏥 勞健保紀錄檢視", "🔑 帳號管理"] if role == 1 else ["💰 薪資發薪作業"]
             tabs = st.tabs(tab_titles)
             
@@ -157,30 +172,23 @@ def main():
                     is_locked = df_lock[df_lock['月份'].astype(str) == target_m].iloc[0]['狀態'] == "LOCKED"
 
                 if role == 1:
-                    with st.sidebar.expander("🛠️ 月份管理"):
-                        st.subheader("➕ 建立新月份")
-                        nm = st.text_input("輸入月份 (2026-06)", "2026-06")
+                    with st.sidebar.expander("🛠️ 月份與鎖定管理"):
+                        nm = st.text_input("建立月份", "2026-06")
                         if st.button("執行建立"):
                             latest_rem = df_pay.sort_values(['姓名','月份'], ascending=[True,False]).drop_duplicates('姓名')[['姓名','備註']] if not df_pay.empty else pd.DataFrame(columns=['姓名','備註'])
                             df_t = df_emp[['姓名']].merge(latest_rem, on='姓名', how='left')
                             new_r = pd.DataFrame({"月份":[nm]*len(df_emp), "店別":df_emp["店別"], "姓名":df_emp["姓名"], "備註":df_t["備註"].fillna("").tolist()})
                             for c in ALL_VAR_COLS: new_r[c] = 0
                             conn.update(worksheet=PAY_SHEET, data=pd.concat([df_pay, new_r], ignore_index=True)); st.cache_data.clear(); st.rerun()
-                        
                         st.markdown("---")
-                        st.subheader("🔒 表單鎖定開關")
-                        st.write(f"目前狀態: {'🔴 已鎖定' if is_locked else '🟢 開放中'}")
-                        if st.button("🔓 解鎖表單" if is_locked else "🔒 鎖定表單"):
-                            next_s = "OPEN" if is_locked else "LOCKED"
-                            new_lock = pd.DataFrame({"月份": [target_m], "狀態": [next_s]})
+                        if st.button("🔓 解鎖/🔒 鎖定目前月份"):
+                            new_status = "OPEN" if is_locked else "LOCKED"
+                            new_row = pd.DataFrame({"月份": [target_m], "狀態": [new_status]})
                             others = df_lock[df_lock['月份'].astype(str) != target_m]
-                            conn.update(worksheet=LOCK_SHEET, data=pd.concat([others, new_lock], ignore_index=True))
-                            st.cache_data.clear(); st.rerun()
-
-                        st.markdown("---")
+                            conn.update(worksheet=LOCK_SHEET, data=pd.concat([others, new_row], ignore_index=True)); st.cache_data.clear(); st.rerun()
                         if all_m_safe:
-                            del_m = st.selectbox("刪除月份", all_m_safe, key="del_sel")
-                            if st.button("🔥 刪除") and st.checkbox(f"確認刪除 {del_m}"):
+                            del_m = st.selectbox("刪除月份", all_m_safe, key="del_selector")
+                            if st.button("🔥 執行刪除") and st.checkbox(f"確認刪除 {del_m}"):
                                 conn.update(worksheet=PAY_SHEET, data=df_pay[df_pay['月份'].astype(str) != del_m]); st.cache_data.clear(); st.rerun()
 
                 if target_m != "無":
@@ -199,19 +207,17 @@ def main():
                     for c in ALL_VAR_COLS + ['基本薪資合計', '執照津貼', '車資補貼', '勞健保個人負擔']: curr[c] = pd.to_numeric(curr[c], errors='coerce').fillna(0)
                     curr['應付金額'] = (curr['基本薪資合計'] + curr['執照津貼'] + curr['車資補貼'] + curr[ALL_VAR_COLS].sum(axis=1)) - curr['勞健保個人負擔']
 
-                    st.subheader(f"📅 {target_m} 薪資核對 ({'🔒 唯讀' if is_locked and role == 3 else '✍️ 編輯'})")
+                    st.subheader(f"📅 {target_m} 薪資核對 ({'🔒 鎖定' if is_locked and role == 3 else '✍️ 編輯'})")
                     if role == 1:
                         unit_f = st.radio("篩選", ["全部", "藥局", "個管師"], horizontal=True)
                         disp_df = curr.copy()
                         if unit_f != "全部":
                             disp_df = disp_df[disp_df['單位'] == unit_f]
-                            active_vars = PHARMACY_VAR if unit_f == "藥局" else CASE_MGR_VAR
-                            base_info = ["基本薪資合計"] if unit_f == "藥局" else ["基本薪資合計", "執照津貼", "車資補貼"]
-                            disp_df = disp_df[["月份", "店別", "姓名"] + base_info + active_vars + ["勞健保個人負擔", "應付金額", "備註"]]
-                    else:
-                        disp_df = curr.copy()
-                        unit_t = "藥局" if not disp_df.empty and str(disp_df.iloc[0]['單位']).strip() == "藥局" else "個管師"
-                        disp_df = disp_df[["月份", "店別", "姓名"] + (PHARMACY_VAR if unit_t == "藥局" else CASE_MGR_VAR) + ["備註"]]
+                            active_v = PHARMACY_VAR if unit_f == "藥局" else CASE_MGR_VAR
+                            disp_df = disp_df[["月份", "店別", "姓名"] + (["基本薪資合計"] if unit_f == "藥局" else ["基本薪資合計", "執照津貼", "車資補貼"]) + active_v + ["勞健保個人負擔", "應付金額", "備註"]]
+                    else: # 店長隱藏總金額
+                        unit_t = "藥局" if not curr.empty and str(curr.iloc[0]['單位']).strip() == "藥局" else "個管師"
+                        disp_df = curr[["月份", "店別", "姓名"] + (PHARMACY_VAR if unit_t == "藥局" else CASE_MGR_VAR) + ["備註"]]
 
                     edited = st.data_editor(disp_df, key="main_edit", num_rows="dynamic", disabled=(is_locked and role == 3))
 
@@ -221,7 +227,7 @@ def main():
                                 for col in edited.columns:
                                     if col in ALL_VAR_COLS or col == "備註":
                                         df_pay.loc[(df_pay['月份'].astype(str) == target_m) & (df_pay['姓名'] == row['姓名']), col] = row[col]
-                            conn.update(worksheet=PAY_SHEET, data=df_pay); st.cache_data.clear(); st.success("存檔成功")
+                            conn.update(worksheet=PAY_SHEET, data=df_pay); st.cache_data.clear(); st.success("已存檔")
 
                     if role == 1:
                         st.markdown("---")
@@ -235,7 +241,7 @@ def main():
 
             if role == 1:
                 with tabs[1]:
-                    e_emp = st.data_editor(df_emp, num_rows="dynamic")
+                    e_emp = st.data_editor(df_emp, num_rows="dynamic", key="emp_edit")
                     if st.button("💾 更新員工資料庫"): conn.update(worksheet=EMP_SHEET, data=e_emp); st.cache_data.clear()
                 with tabs[2]: st.dataframe(df_ins[INS_COLS].sort_values(['姓名', '生效月份'], ascending=[True, False]))
                 with tabs[3]: st.dataframe(df_acc[["姓名", "帳號", "身分證"]])
