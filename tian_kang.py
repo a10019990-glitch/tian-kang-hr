@@ -38,7 +38,7 @@ def robust_clean(df, expected_cols=None):
     if "姓名" in df.columns: df["姓名"] = df["姓名"].astype(str).str.replace(r'\s+', '', regex=True)
     return df.loc[:, ~df.columns.duplicated()]
 
-# 💡 網銀格式保全：附言與性質為「轉帳存入」
+# 💡 網銀標籤校準
 def generate_bank_csv(df_source, df_employee, target_m):
     emp_sub = df_employee[['姓名', '身分證', '收款帳號']].drop_duplicates('姓名')
     f_df = df_source.merge(emp_sub, on='姓名', how='left')
@@ -71,7 +71,7 @@ def main():
         except:
             df_lock = pd.DataFrame(columns=['月份', '狀態'])
     except Exception as e:
-        st.error(f"❌ 雲端讀取失敗: {e}"); st.stop()
+        st.error(f"❌ 雲端連線失敗: {e}"); st.stop()
 
     if 'auth' not in st.session_state:
         mode = st.radio("入口選擇", ["管理端登入", "員工薪資查詢", "新帳號註冊"], horizontal=True)
@@ -105,17 +105,17 @@ def main():
 
     role, shop = st.session_state.auth, st.session_state.shop
 
-    # --- 權限 5: 員工專區 (實領總額修復與全明細顯示) ---
+    # --- 權限 5: 員工專區 (100% 總額同步修正) ---
     if role == 5:
         name = st.session_state.user_name.replace(" ", "")
-        st.subheader(f"👋 {name}，個人薪資明細")
+        st.subheader(f"👋 {name}，個人薪資明細查詢")
         emp_match = df_emp[df_emp['姓名'] == name]
         if not emp_match.empty:
             emp_info = emp_match.iloc[0]
             unit = str(emp_info['單位']).strip()
             p_pay = df_pay[df_pay['姓名'] == name].copy()
             
-            # 💡 抓取該月份適用的最新勞健保
+            # 抓取對應月份生效的勞健保紀錄
             ins_rows = []
             for m in p_pay['月份'].astype(str):
                 valid_ins = df_ins[(df_ins['姓名'] == name) & (df_ins['生效月份'].astype(str) <= m)]
@@ -127,33 +127,28 @@ def main():
             
             p_pay = pd.concat([p_pay.reset_index(drop=True), pd.DataFrame(ins_rows).reset_index(drop=True)], axis=1)
             
-            # 💡 計算總額前，強制所有相關欄位轉數字並補 0
+            # 💡 數據清洗與補 0 (確保與 Boss 端應付金額算法完全一致)
             p_pay['基本薪資合計'] = pd.to_numeric(emp_info['基本薪資合計'], errors='coerce')
             p_pay['執照津貼'] = pd.to_numeric(emp_info['執照津貼'], errors='coerce')
             p_pay['車資補貼'] = pd.to_numeric(emp_info['車資補貼'], errors='coerce')
             
-            # 處理所有獎金與勞健保自負額 (對應 Boss 端的 ALL_VAR_COLS)
             calc_cols = ALL_VAR_COLS + ['勞保', '健保', '勞健保個人負擔', '基本薪資合計', '執照津貼', '車資補貼']
             for c in calc_cols:
                 if c in p_pay.columns:
                     p_pay[c] = pd.to_numeric(p_pay[c], errors='coerce').fillna(0)
             
-            # 計算公式：本薪 + 津貼 + 該單位獎金 - 勞健保自負額 (與 Boss 的應付金額同步)
             bonus_cols = PHARMACY_VAR if unit == "藥局" else CASE_MGR_VAR
-            base_total = p_pay['基本薪資合計'] + p_pay['執照津貼'] + p_pay['車資補貼']
-            p_pay['實領總額'] = (base_total + p_pay[bonus_cols].sum(axis=1)) - p_pay['勞健保個人負擔']
+            p_pay['實領總額'] = (p_pay['基本薪資合計'] + p_pay['執照津貼'] + p_pay['車資補貼'] + p_pay[bonus_cols].sum(axis=1)) - p_pay['勞健保個人負擔']
             
-            # 顯示欄位
             cols = ['月份', '姓名', '基本薪資合計'] + bonus_cols + ['勞保', '健保', '健保人數', '勞健保個人負擔', '實領總額', '備註']
             st.dataframe(p_pay[[c for c in cols if c in p_pay.columns]])
         if st.sidebar.button("登出"): del st.session_state['auth']; st.rerun()
 
     else:
-        # 管理端 (老闆、會計、店長功能保持)
         st.sidebar.success(f"📍 權限：{shop}")
         if st.sidebar.button("登出系統"): del st.session_state['auth']; st.rerun()
 
-        if role == 4: # 會計
+        if role == 4: # 會計 (修正排序 TypeError)
             t_acct = st.tabs(["🏥 勞健保明細維護", "👤 全體員工名單"])
             with t_acct[0]:
                 e_ins = st.data_editor(df_ins[INS_COLS], num_rows="dynamic", key="acct_edit")
@@ -161,8 +156,9 @@ def main():
                     conn.update(worksheet=INS_SHEET, data=e_ins); st.cache_data.clear(); st.success("更新成功")
             with t_acct[1]:
                 df_v = df_emp[["店別", "姓名", "單位", "身分證"]].copy()
+                # 💡 修正關鍵：排序前強制轉為字串，防止數字與文字混合導致崩潰
+                df_v['店別'] = df_v['店別'].astype(str)
                 df_view = df_v.sort_values("店別")
-                df_view['店別'] = df_view['店別'].astype(str)
                 st.dataframe(df_view)
 
         else: # 老闆 (1) 與 店長 (3)
@@ -197,6 +193,7 @@ def main():
                                 conn.update(worksheet=PAY_SHEET, data=df_pay[df_pay['月份'].astype(str) != dm]); st.cache_data.clear(); st.rerun()
 
                 if target_m != "無":
+                    # 管理端對齊邏輯
                     l_ins_list = []
                     for n in df_emp['姓名']:
                         valid = df_ins[(df_ins['姓名'] == n) & (df_ins['生效月份'].astype(str) <= target_m)]
