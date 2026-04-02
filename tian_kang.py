@@ -43,7 +43,7 @@ def generate_bank_csv(df_source, df_employee, target_m):
     emp_sub = df_employee[['姓名', '身分證', '收款帳號']].drop_duplicates('姓名')
     f_df = df_source.merge(emp_sub, on='姓名', how='left')
     bank = pd.DataFrame({
-        "付款日期": datetime.now().strftime("%Y%m%d"), "轉帳項目": "901", "企業編號": "75440263",
+        "付款日期": datetime.now().strftime("%Y%m%d"), "轉帳項目": "901", "企業編號": "5917",
         "員工姓名": f_df["姓名"], "身分證字號": f_df["身分證"], "收款帳號": f_df["收款帳號"],
         "交易金額": f_df["應付金額"], "附言": "轉帳存入", "付款性質": "轉帳存入"
     })
