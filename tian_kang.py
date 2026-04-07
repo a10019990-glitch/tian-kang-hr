@@ -18,9 +18,8 @@ LOCK_SHEET = "lock_status"
 
 st.set_page_config(page_title="天康藥局雲端管理系統", layout="wide")
 
-# --- 2. Email 發送核心函數 (已填入您的資訊) ---
+# --- 2. Email 發送核心函數 (承瑋大助專屬金鑰) ---
 def send_salary_email(to_email, name, month, unit, details_dict):
-    # 💡 承瑋大助提供的 Gmail 資訊
     SENDER_EMAIL = "a10019990@gmail.com"
     SENDER_PASSWORD = "aczy dkos wjnd cgkm" 
 
@@ -29,7 +28,6 @@ def send_salary_email(to_email, name, month, unit, details_dict):
     message["To"] = to_email
     message["Subject"] = f"【薪資通知】{month} 月份薪資明細 - {name}"
 
-    # 建立 HTML 表格內容 (美化排版)
     rows_html = "".join([f"<tr><th style='border:1px solid #ddd; padding:10px; background:#f9f9f9; text-align:left;'>{k}</th><td style='border:1px solid #ddd; padding:10px; text-align:right;'>{v} 元</td></tr>" if "元" not in str(v) and isinstance(v, (int, float)) else f"<tr><th style='border:1px solid #ddd; padding:10px; background:#f9f9f9; text-align:left;'>{k}</th><td style='border:1px solid #ddd; padding:10px; text-align:right;'>{v}</td></tr>" for k, v in details_dict.items()])
     
     html = f"""
@@ -47,7 +45,6 @@ def send_salary_email(to_email, name, month, unit, details_dict):
     </html>
     """
     message.attach(MIMEText(html, "html"))
-
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(SENDER_EMAIL, SENDER_PASSWORD)
@@ -108,7 +105,7 @@ def main():
         df_acc = robust_clean(conn.read(worksheet=ACC_SHEET, ttl=300))
         try: df_lock = robust_clean(conn.read(worksheet=LOCK_SHEET, ttl=300), expected_cols=['月份', '狀態'])
         except: df_lock = pd.DataFrame(columns=['月份', '狀態'])
-    except Exception as e: st.error(f"雲端連線失敗: {e}"); st.stop()
+    except Exception as e: st.error(f"雲端讀取失敗: {e}"); st.stop()
 
     if 'auth' not in st.session_state:
         mode = st.radio("入口選擇", ["管理端登入", "員工薪資查詢", "新帳號註冊"], horizontal=True)
@@ -128,22 +125,26 @@ def main():
             if st.button("登入"):
                 match = df_acc[(df_acc['帳號'] == e_acc) & (df_acc['密碼'] == hash_password(e_pw))]
                 if not match.empty:
-                    st.session_state.auth, st.session_state.user_name = 5, match.iloc[0]['姓名']; st.rerun()
+                    # 💡 修正關鍵：員工登入也要給予 shop 變數，防止 Attribute Error
+                    st.session_state.auth = 5
+                    st.session_state.user_name = match.iloc[0]['姓名']
+                    st.session_state.shop = "PERSONAL" 
+                    st.rerun()
         elif mode == "新帳號註冊":
             with st.form("reg"):
-                n, i, a, p = st.text_input("姓名"), st.text_input("身分證"), st.text_input("自訂帳號"), st.text_input("自訂密碼", type="password")
-                if st.form_submit_button("執行註冊"):
+                n, i, a, p = st.text_input("姓名"), st.text_input("身分證"), st.text_input("帳號"), st.text_input("密碼", type="password")
+                if st.form_submit_button("註冊"):
                     new_u = pd.DataFrame({"姓名":[n.replace(" ","")], "身分證":[i], "帳號":[a], "密碼":[hash_password(p)]})
                     conn.update(worksheet=ACC_SHEET, data=pd.concat([df_acc, new_u], ignore_index=True))
                     st.cache_data.clear(); st.success("註冊成功")
         return
 
+    # 💡 這裡現在不會再報錯了
     role, shop = st.session_state.auth, st.session_state.shop
 
-    # --- 員工視角 (Role 5) ---
-    if role == 5:
+    if role == 5: # 員工專區
         name = st.session_state.user_name.replace(" ", "")
-        st.subheader(f"👋 {name}，您好！")
+        st.subheader(f"👋 {name} 同仁，您的薪資明細")
         emp_m = df_emp[df_emp['姓名'] == name]
         if not emp_m.empty:
             emp_info = emp_m.iloc[0]; unit = str(emp_info['單位']).strip()
@@ -153,10 +154,12 @@ def main():
                 v_ins = df_ins[(df_ins['姓名'] == name) & (df_ins['生效月份'].astype(str) <= m)]
                 ins_rows.append(v_ins.sort_values('生效月份', ascending=False).iloc[0][['勞保','健保','健保人數','勞健保個人負擔']] if not v_ins.empty else pd.Series([0,0,0,0], index=['勞保','健保','健保人數','勞健保個人負擔']))
             p_pay = pd.concat([p_pay.reset_index(drop=True), pd.DataFrame(ins_rows).reset_index(drop=True)], axis=1)
+            
             p_pay['基本薪資合計'] = clean_val(emp_info['基本薪資合計'])
             p_pay['執照津貼'] = clean_val(emp_info['執照津貼'])
             p_pay['車資補貼'] = clean_val(emp_info['車資補貼'])
             for c in ALL_VAR_COLS + ['勞保','健保','勞健保個人負擔']: p_pay[c] = p_pay[c].apply(clean_val)
+            
             bonus_cols = PHARMACY_VAR if unit == "藥局" else CASE_MGR_VAR
             p_pay['實領總額'] = (p_pay['基本薪資合計'] + p_pay['執照津貼'] + p_pay['車資補貼'] + p_pay[bonus_cols].sum(axis=1)) - p_pay['勞健保個人負擔']
             cols = ['月份', '姓名', '基本薪資合計'] + bonus_cols + ['勞保', '健保', '健保人數', '勞健保個人負擔', '實領總額', '備註']
@@ -167,7 +170,7 @@ def main():
         st.sidebar.success(f"📍 權限：{shop}")
         if st.sidebar.button("登出系統"): del st.session_state['auth']; st.rerun()
 
-        if role == 4: # 會計
+        if role == 4: # 會計 (排序修正)
             t_acct = st.tabs(["🏥 勞健保明細維護", "👤 全體員工名單"])
             with t_acct[0]:
                 e_ins = st.data_editor(df_ins[INS_COLS], num_rows="dynamic", key="ac_ed")
@@ -179,7 +182,6 @@ def main():
         else: # 老闆 與 店長
             tab_titles = ["💰 薪資發薪作業", "👤 員工資料庫", "🏥 勞健保紀錄檢視", "🔑 帳號管理"] if role == 1 else ["💰 薪資發薪作業"]
             tabs = st.tabs(tab_titles)
-            
             with tabs[0]:
                 all_m_safe = sorted([str(m) for m in df_pay['月份'].dropna().unique() if str(m).strip() != ""], reverse=True)
                 target_m = st.sidebar.selectbox("月份切換", all_m_safe if all_m_safe else ["無"], key="tgt_m")
@@ -219,19 +221,15 @@ def main():
                     uf = st.radio("篩選單位", ["全部", "藥局", "個管師"], horizontal=True) if role == 1 else "全部"
                     disp = curr.copy()
                     if role == 1 and uf != "全部": disp = disp[disp['單位'] == uf]
-                    
-                    # 💡 控制顯示欄位
                     if role == 3: disp = disp[["月份", "店別", "姓名"] + (PHARMACY_VAR if (not disp.empty and disp.iloc[0]['單位']=="藥局") else CASE_MGR_VAR) + ["備註"]]
 
                     edited = st.data_editor(disp, key="main_edit", disabled=(is_locked and role == 3))
-                    
-                    if not (is_locked and role == 3):
-                        if st.button("💾 同步薪資存檔"):
-                            for idx, row in edited.iterrows():
-                                for col in edited.columns:
-                                    if col in ALL_VAR_COLS or col == "備註":
-                                        df_pay.loc[(df_pay['月份'].astype(str) == target_m) & (df_pay['姓名'] == row['姓名']), col] = row[col]
-                            conn.update(worksheet=PAY_SHEET, data=df_pay); st.cache_data.clear(); st.success("存檔成功")
+                    if not (is_locked and role == 3) and st.button("💾 同步薪資存檔"):
+                        for idx, row in edited.iterrows():
+                            for col in edited.columns:
+                                if col in ALL_VAR_COLS or col == "備註":
+                                    df_pay.loc[(df_pay['月份'].astype(str) == target_m) & (df_pay['姓名'] == row['姓名']), col] = row[col]
+                        conn.update(worksheet=PAY_SHEET, data=df_pay); st.cache_data.clear(); st.success("存檔成功")
 
                     if role == 1:
                         st.markdown("---")
@@ -239,7 +237,7 @@ def main():
                         with c1: st.download_button("📥 藥局網銀檔", generate_bank_csv(curr[curr['單位'] == "藥局"], df_emp, target_m), f"Phar_{target_m}.csv")
                         with c2: st.download_button("📥 個管師網銀檔", generate_bank_csv(curr[curr['單位'] == "個管師"], df_emp, target_m), f"Case_{target_m}.csv")
                         with c3:
-                            if st.button(f"📧 批量發送 {target_m} Email 薪資單"):
+                            if st.button(f"📧 批量發送 {target_m} Email"):
                                 sc = 0
                                 with st.spinner("傳送中..."):
                                     for _, r in edited.iterrows():
@@ -248,7 +246,7 @@ def main():
                                         det = {"基本薪資": r['基本薪資合計'], "執照津貼": r['執照津貼'], "車資補貼": r['車資補貼']}
                                         for b in b_cols: det[b] = r[b]
                                         det.update({"勞健保扣款": f"-{r['勞健保個人負擔']}", "實領總額": r['應付金額'], "備註": r['備註']})
-                                        ok, err = send_salary_email(r['電子郵件'], r['姓名'], target_m, r['單位'], det)
+                                        ok, _ = send_salary_email(r['電子郵件'], r['姓名'], target_m, r['單位'], det)
                                         if ok: sc += 1
                                 st.success(f"✅ 成功寄出 {sc} 封明細。")
 
