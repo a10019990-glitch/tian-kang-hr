@@ -88,7 +88,7 @@ def fetch_all_data():
         else: raise e
 
 def main():
-    st.title("🚀 天康藥局管理系統 (權限修正版)")
+    st.title("🚀 天康藥局管理系統 (權限完全解鎖版)")
     if st.sidebar.button("🔄 同步資料"): st.cache_data.clear(); st.rerun()
 
     df_emp, df_pay, df_ins, df_acc, df_lv, df_ot, df_lock = fetch_all_data()
@@ -120,7 +120,7 @@ def main():
         st.subheader(f"👋 {name} 同仁")
         t1, t2, t3 = st.tabs(["💰 薪資單", "📅 差勤申請", "🔍 歷史紀錄"])
         
-        with t1: # 員工薪資單精算
+        with t1: 
             p_pay = df_pay[df_pay['姓名'] == name].copy()
             e_info = df_emp[df_emp['姓名'] == name].iloc[0] if not df_emp[df_emp['姓名'] == name].empty else pd.Series()
             if not p_pay.empty and not e_info.empty:
@@ -183,7 +183,7 @@ def main():
 
                 curr = df_pay[df_pay['月份'].astype(str) == target_m].copy()
                 
-                if role == 1: # --- 老闆視角：分類與應付金額 ---
+                if role == 1: # --- 老闆視角 ---
                     curr = curr.merge(df_emp[['姓名','單位','基本薪資合計','執照津貼','車資補貼','電子郵件','加班時薪']], on='姓名', how='left')
                     l_ins_list = []
                     for n in curr['姓名']:
@@ -194,10 +194,11 @@ def main():
                     curr['應付金額'] = (curr['基本薪資合計'] + clean_val(curr.get('執照津貼',0)) + clean_val(curr.get('車資補貼',0)) + curr[ALL_VAR_COLS].sum(axis=1)) - curr['勞健保個人負擔']
                     
                     st.subheader("💊 藥局組")
-                    ed_p = st.data_editor(curr[curr['單位'] == "藥局"][['月份','店別','姓名','基本薪資合計','應付金額','電子郵件'] + PHARMACY_VAR + ['加班津貼','備註']], key="bp")
+                    lock_state_boss = True if is_locked else ["月份", "店別", "姓名", "基本薪資合計", "應付金額", "電子郵件"]
+                    ed_p = st.data_editor(curr[curr['單位'] == "藥局"][['月份','店別','姓名','基本薪資合計','應付金額','電子郵件'] + PHARMACY_VAR + ['加班津貼','備註']], disabled=lock_state_boss, key="bp")
                     st.subheader("📂 個管師組")
-                    ed_c = st.data_editor(curr[curr['單位'] == "個管師"][['月份','店別','姓名','基本薪資合計','應付金額','電子郵件'] + CASE_MGR_VAR + ['加班津貼','備註']], key="bc")
-                    if st.button("💾 老闆同步存檔"):
+                    ed_c = st.data_editor(curr[curr['單位'] == "個管師"][['月份','店別','姓名','基本薪資合計','應付金額','電子郵件'] + CASE_MGR_VAR + ['加班津貼','備註']], disabled=lock_state_boss, key="bc")
+                    if st.button("💾 老闆同步存檔") and not is_locked:
                         for _, r in pd.concat([ed_p, ed_c]).iterrows():
                             for col in ALL_VAR_COLS + ['備註']: df_pay.loc[(df_pay['月份'].astype(str) == target_m) & (df_pay['姓名'] == r['姓名']), col] = r[col]
                         conn.update(worksheet=PAY_SHEET, data=df_pay); st.success("完成")
@@ -209,8 +210,8 @@ def main():
                             for _, r in pd.concat([ed_p, ed_c]).iterrows(): send_salary_email(r.get('電子郵件'), r['姓名'], target_m, r.get('應付金額', 0))
                             st.success("✅ 完成")
                 
-                elif role == 3: # --- 💡 店長視角 (編輯權限強制開啟 ✅ + 嚴格隔離個管師 ✅) ---
-                    # 1. 嚴格過濾：只抓該店且為「藥局」的人員
+                elif role == 3: # --- 💡 店長視角 (強制轉型解鎖編輯權限 ✅) ---
+                    # 1. 嚴格過濾：只能看到本分店，且為藥局的人員
                     mgr_view = curr.merge(df_emp[['姓名','單位','店別']], on='姓名', how='left')
                     mgr_view = mgr_view[(mgr_view['店別_y'].astype(str).str.zfill(2) == shop) & (mgr_view['單位'] == "藥局")]
                     
@@ -219,17 +220,23 @@ def main():
                         rate = clean_val(df_emp[df_emp['姓名'] == r['姓名']].iloc[0].get('加班時薪', 0))
                         r['加班時數'] = round(clean_val(r['加班津貼']) / rate, 2) if rate > 0 else 0.0
                         disp_l.append(r)
+                    
                     f_mgr = pd.DataFrame(disp_l)
                     
-                    # 2. 強制補齊藥局獎金欄位 (避免資料庫未建置時導致欄位消失無法編輯)
-                    for col in PHARMACY_VAR + ["加班時數", "備註"]:
-                        if col not in f_mgr.columns: f_mgr[col] = 0.0 if col != "備註" else ""
+                    # 💡 2. 核心修復：強制補齊欄位，並強制轉為數字，打破 Streamlit 的鎖定保護
+                    edit_cols = ["月份", "店別_y", "姓名"] + PHARMACY_VAR + ["加班時數", "備註"]
+                    for col in edit_cols:
+                        if col not in f_mgr.columns:
+                            f_mgr[col] = "" if col in ["月份", "店別_y", "姓名", "備註"] else 0.0
+                        if col in PHARMACY_VAR + ["加班時數"]:
+                            f_mgr[col] = pd.to_numeric(f_mgr[col], errors='coerce').fillna(0.0)
                     
                     st.subheader("💰 藥局發薪作業 (店長權限 - 個管師已隱藏)")
-                    # 3. 強制指定顯示與編輯的欄位
-                    edit_cols = ["月份", "店別_y", "姓名"] + PHARMACY_VAR + ["加班時數", "備註"]
                     if not f_mgr.empty:
-                        ed_mgr = st.data_editor(f_mgr[edit_cols], disabled=is_locked, key="mp")
+                        # 3. 如果未鎖定月份，只鎖死基本身分資料；若鎖定，則全鎖。
+                        lock_state = edit_cols if is_locked else ["月份", "店別_y", "姓名"]
+                        
+                        ed_mgr = st.data_editor(f_mgr[edit_cols], disabled=lock_state, key="mp")
                         if st.button("💾 店長存檔同步") and not is_locked:
                             for _, row in ed_mgr.iterrows():
                                 rate = clean_val(df_emp[df_emp['姓名'] == row['姓名']].iloc[0].get('加班時薪', 0))
@@ -238,7 +245,8 @@ def main():
                                     df_pay.loc[mask, '加班津貼'] = float(round(clean_val(row.get('加班時數', 0)) * rate))
                                     for col in PHARMACY_VAR + ['備註']: df_pay.loc[mask, col] = row[col]
                             conn.update(worksheet=PAY_SHEET, data=df_pay); st.cache_data.clear(); st.success("店長存檔完成")
-                    else: st.warning("本月份該店尚無藥局人員資料。")
+                    else:
+                        st.info("本月份該店尚無藥局人員資料。")
 
         # --- Boss 專屬管理分頁 ---
         if role == 1:
