@@ -8,7 +8,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# --- 1. 系統常數與分頁定義 ---
+# --- 1. 系統設定與分頁定義 ---
 SHEET_ID = "1TcrNfnSKj7hMd0LOXipBD9eKAft6yU7YnhZNX6rtPhg"
 PAY_SHEET, EMP_SHEET, INS_SHEET = "salary_data", "emp_info", "ins_info"
 ACC_SHEET, LOCK_SHEET = "user_accounts", "lock_status"
@@ -73,7 +73,7 @@ def send_salary_email(to_email, name, month, total):
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s: s.login(S_EMAIL, S_PW); s.send_message(msg); return True
     except: return False
 
-# --- 4. 數據讀取與 429 流量防禦 ---
+# --- 4. 數據讀取 ---
 @st.cache_data(ttl=120)
 def fetch_all_data():
     conn = st.connection("gsheets", type=GSheetsConnection)
@@ -89,11 +89,6 @@ def fetch_all_data():
     try: df_lock = robust_clean(conn.read(worksheet=LOCK_SHEET, ttl=30), None, ["月份", "狀態"])
     except: df_lock = pd.DataFrame(columns=['月份', '狀態'])
     
-    # 強制數值型態轉換，防止 Streamlit 鎖死編輯框或產生 ValueError
-    for col in ['本月加班時數', '換錢時數', '加班津貼', '補休餘額', '基本薪資合計']:
-        if col in df_pay.columns: df_pay[col] = pd.to_numeric(df_pay[col], errors='coerce').fillna(0.0)
-        if col in df_emp.columns: df_emp[col] = pd.to_numeric(df_emp[col], errors='coerce').fillna(0.0)
-        
     return df_emp, df_pay, df_ins, df_acc, df_lv, df_ot, df_lock
 
 def main():
@@ -102,12 +97,11 @@ def main():
     if st.sidebar.button("🔄 同步資料 (清除快取)"): 
         st.cache_data.clear(); st.rerun()
 
-    # 攔截 API 崩潰
     try:
         df_emp, df_pay, df_ins, df_acc, df_lv, df_ot, df_lock = fetch_all_data()
         conn = st.connection("gsheets", type=GSheetsConnection)
     except Exception as e:
-        st.error("🚨 系統連線暫時受到 Google 流量限制 (429 Quota Exceeded)。\n\n請等待約 30 秒後，再重新載入網頁即可恢復。")
+        st.error("🚨 系統連線暫時受到 Google 流量限制。請等待約 30 秒後再重新載入網頁。")
         st.stop()
 
     if 'auth' not in st.session_state:
@@ -146,7 +140,12 @@ def main():
                     ins_list.append(v_ins.sort_values('生效月份', ascending=False).iloc[0].reindex(['勞健保個人負擔'], fill_value=0) if not v_ins.empty else pd.Series([0], index=['勞健保個人負擔']))
                 p_pay = pd.concat([p_pay.reset_index(drop=True), pd.DataFrame(ins_list).reset_index(drop=True)], axis=1)
                 b_cols = PHARMACY_VAR if e_info.get('單位') == "藥局" else CASE_MGR_VAR
-                for c in ALL_VAR_COLS + ['勞健保個人負擔', '本月加班時數', '換錢時數']: p_pay[c] = pd.to_numeric(p_pay[c], errors='coerce').fillna(0)
+                
+                # 💡 防呆：強制補齊所有運算欄位
+                for c in ALL_VAR_COLS + ['勞健保個人負擔', '本月加班時數', '換錢時數']: 
+                    if c not in p_pay.columns: p_pay[c] = 0.0
+                    p_pay[c] = pd.to_numeric(p_pay[c], errors='coerce').fillna(0.0)
+                
                 base = clean_val(e_info.get('基本薪資合計', 0)); lic = clean_val(e_info.get('執照津貼', 0)); trans = clean_val(e_info.get('車資補貼', 0))
                 p_pay['基本薪資合計'] = base; p_pay['執照津貼'] = lic; p_pay['車資補貼'] = trans
                 p_pay['實領總額'] = (base + lic + trans + p_pay[b_cols].sum(axis=1) + p_pay['加班津貼']) - p_pay['勞健保個人負擔']
@@ -158,7 +157,7 @@ def main():
             st.metric("補休餘額", f"{clean_val(ebal.get('補休餘額',0))} hr")
             with st.form("emp_apply"):
                 lt = st.selectbox("申請項目", list(LEAVE_TYPES.keys()) + ["加班預約", "補休轉現金"]); ld, lh, lr = st.date_input("日期"), st.number_input("小時", 0.5, 12.0, 1.0, 0.5), st.text_area("理由")
-                if st.form_submit_button("送出申請"):
+                if st.form_submit_button("送出"):
                     if "加班" in lt: conn.update(worksheet=OT_SHEET, data=pd.concat([df_ot, pd.DataFrame({"日期":[str(ld)],"姓名":[name],"時數":[lh],"處理方式":["累積補休"],"原因":[lr],"狀態":["待審核"]})], ignore_index=True))
                     elif "補休" in lt: conn.update(worksheet=OT_SHEET, data=pd.concat([df_ot, pd.DataFrame({"日期":[str(ld)],"姓名":[name],"時數":[lh],"處理方式":["換錢"],"原因":["補休核現"],"狀態":["待審核"]})], ignore_index=True))
                     else: conn.update(worksheet=LEAVE_SHEET, data=pd.concat([df_lv, pd.DataFrame({"日期":[str(ld)],"姓名":[name],"類別":[lt],"時數":[lh],"事由":[lr],"狀態":["待審核"]})], ignore_index=True))
@@ -178,7 +177,7 @@ def main():
         if "💰 薪資發薪作業" in t_titles:
             with tabs[0]:
                 all_m = sorted([str(m) for m in df_pay['月份'].dropna().unique()], reverse=True) if '月份' in df_pay.columns else ["無"]
-                target_m = st.sidebar.selectbox("切換月份", all_m, key="m_box")
+                target_m = st.sidebar.selectbox("月份切換", all_m, key="m_box")
                 is_locked = any(df_lock[df_lock['月份'].astype(str) == target_m]['狀態'] == "LOCKED") if not df_lock.empty else False
                 
                 if role == 1: # 🚀 老闆月份管理
@@ -194,24 +193,32 @@ def main():
                             others = df_lock[df_lock['月份'].astype(str) != target_m]
                             conn.update(worksheet=LOCK_SHEET, data=pd.concat([others, new_lock], ignore_index=True)); st.cache_data.clear(); st.rerun()
                         del_m = st.selectbox("刪除月份", all_m, key="del_box")
-                        if st.button("🔥 執行刪除") and st.checkbox("確認刪除"):
+                        if st.button("🔥 執行刪除") and st.checkbox("確認"):
                             conn.update(worksheet=PAY_SHEET, data=df_pay[df_pay['月份'].astype(str) != del_m]); st.cache_data.clear(); st.rerun()
 
                 curr = df_pay[df_pay['月份'].astype(str) == target_m].copy()
                 
                 if role == 1: # --- 老闆全覽視角 ---
                     curr = curr.merge(df_emp[['姓名','單位','基本薪資合計','執照津貼','車資補貼','電子郵件','加班時薪', '補休餘額']], on='姓名', how='left')
-                    curr.rename(columns={'補休餘額': '現有補休'}, inplace=True)
+                    if '補休餘額' in curr.columns: curr.rename(columns={'補休餘額': '現有補休'}, inplace=True)
+                    else: curr['現有補休'] = 0.0
                     
                     l_ins_list = []
                     for n in curr['姓名']:
                         v = df_ins[(df_ins['姓名'] == n) & (df_ins['生效月份'].astype(str) <= target_m)] if '生效月份' in df_ins.columns else pd.DataFrame()
                         l_ins_list.append(v.sort_values('生效月份', ascending=False).iloc[0].reindex(['姓名','勞健保個人負擔'], fill_value=0) if not v.empty else pd.Series([n,0], index=['姓名','勞健保個人負擔']))
-                    curr = curr.merge(pd.DataFrame(l_ins_list), on='姓名', how='left')
                     
-                    for c in ALL_VAR_COLS + ['基本薪資合計','勞健保個人負擔', '本月加班時數', '換錢時數', '現有補休']: 
-                        curr[c] = pd.to_numeric(curr[c], errors='coerce').fillna(0)
-                    curr['應付金額'] = (curr['基本薪資合計'] + clean_val(curr.get('執照津貼',0)) + clean_val(curr.get('車資補貼',0)) + curr[ALL_VAR_COLS].sum(axis=1)) - curr['勞健保個人負擔']
+                    ins_df = pd.DataFrame(l_ins_list)
+                    if not ins_df.empty: curr = curr.merge(ins_df, on='姓名', how='left')
+                    else: curr['勞健保個人負擔'] = 0.0
+                    
+                    # 💡 防呆 KeyError 修復：確保所有計算欄位存在
+                    calc_cols = ALL_VAR_COLS + ['基本薪資合計', '勞健保個人負擔', '本月加班時數', '換錢時數', '現有補休', '執照津貼', '車資補貼']
+                    for c in calc_cols: 
+                        if c not in curr.columns: curr[c] = 0.0
+                        curr[c] = pd.to_numeric(curr[c], errors='coerce').fillna(0.0)
+                        
+                    curr['應付金額'] = (curr['基本薪資合計'] + curr['執照津貼'] + curr['車資補貼'] + curr[ALL_VAR_COLS].sum(axis=1)) - curr['勞健保個人負擔']
                     
                     st.subheader("💊 藥局組")
                     ed_p = st.data_editor(curr[curr['單位'] == "藥局"][['月份','店別','姓名','現有補休','本月加班時數','換錢時數','基本薪資合計','應付金額','電子郵件'] + PHARMACY_VAR + ['加班津貼','備註']], disabled=["現有補休"] if not is_locked else True, key="bp")
@@ -225,14 +232,13 @@ def main():
                             mask_e = df_emp['姓名'] == emp_name
                             
                             if any(mask_p) and any(mask_e):
-                                rate = clean_val(df_emp.loc[mask_e, '加班時薪'].values[0])
-                                old_add = clean_val(df_pay.loc[mask_p, '本月加班時數'].values[0])
-                                old_cash = clean_val(df_pay.loc[mask_p, '換錢時數'].values[0])
+                                rate = clean_val(df_emp.loc[mask_e, '加班時薪'].values[0]) if '加班時薪' in df_emp.columns else 0
+                                old_add = clean_val(df_pay.loc[mask_p, '本月加班時數'].values[0]) if '本月加班時數' in df_pay.columns else 0
+                                old_cash = clean_val(df_pay.loc[mask_p, '換錢時數'].values[0]) if '換錢時數' in df_pay.columns else 0
                                 new_add = clean_val(r.get('本月加班時數', 0))
                                 new_cash = clean_val(r.get('換錢時數', 0))
 
                                 df_emp.loc[mask_e, '補休餘額'] = clean_val(df_emp.loc[mask_e, '補休餘額'].values[0]) + (new_add - old_add) - (new_cash - old_cash)
-                                
                                 df_pay.loc[mask_p, '本月加班時數'] = new_add
                                 df_pay.loc[mask_p, '換錢時數'] = new_cash
                                 df_pay.loc[mask_p, '加班津貼'] = float(round(new_cash * rate))
@@ -251,15 +257,16 @@ def main():
                             for _, r in pd.concat([ed_p, ed_c]).iterrows(): send_salary_email(r.get('電子郵件'), r['姓名'], target_m, r.get('應付金額', 0))
                             st.success("✅ 完成")
                 
-                elif role == 3: # --- 💡 店長視角 (差額計算與權限完全解鎖) ---
+                elif role == 3: # --- 💡 店長視角 ---
                     mgr_view = curr.merge(df_emp[['姓名','單位','店別', '補休餘額']], on='姓名', how='left')
-                    mgr_view.rename(columns={'補休餘額': '現有補休'}, inplace=True)
-                    # 隔離：只看該分店且為藥局的人員
+                    if '補休餘額' in mgr_view.columns: mgr_view.rename(columns={'補休餘額': '現有補休'}, inplace=True)
+                    else: mgr_view['現有補休'] = 0.0
+                    
+                    # 隔離藥局人員
                     mgr_view = mgr_view[(mgr_view['店別_y'].astype(str).str.zfill(2) == shop) & (mgr_view['單位'] == "藥局")]
                     
                     edit_cols = ["月份", "店別_y", "姓名", "現有補休", "本月加班時數", "換錢時數"] + PHARMACY_VAR + ["備註"]
                     
-                    # 強制轉型，防止 Streamlit 將欄位反灰鎖死
                     for col in edit_cols:
                         if col not in mgr_view.columns:
                             mgr_view[col] = "" if col in ["月份", "店別_y", "姓名", "備註"] else 0.0
@@ -278,13 +285,12 @@ def main():
                                 mask_e = df_emp['姓名'] == emp_name
                                 
                                 if any(mask_p) and any(mask_e):
-                                    rate = clean_val(df_emp.loc[mask_e, '加班時薪'].values[0])
-                                    old_add = clean_val(df_pay.loc[mask_p, '本月加班時數'].values[0])
-                                    old_cash = clean_val(df_pay.loc[mask_p, '換錢時數'].values[0])
+                                    rate = clean_val(df_emp.loc[mask_e, '加班時薪'].values[0]) if '加班時薪' in df_emp.columns else 0
+                                    old_add = clean_val(df_pay.loc[mask_p, '本月加班時數'].values[0]) if '本月加班時數' in df_pay.columns else 0
+                                    old_cash = clean_val(df_pay.loc[mask_p, '換錢時數'].values[0]) if '換錢時數' in df_pay.columns else 0
                                     new_add = clean_val(row.get('本月加班時數', 0))
                                     new_cash = clean_val(row.get('換錢時數', 0))
 
-                                    # 差額計算
                                     df_emp.loc[mask_e, '補休餘額'] = clean_val(df_emp.loc[mask_e, '補休餘額'].values[0]) + (new_add - old_add) - (new_cash - old_cash)
                                     df_pay.loc[mask_p, '本月加班時數'] = new_add
                                     df_pay.loc[mask_p, '換錢時數'] = new_cash
