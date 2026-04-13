@@ -73,7 +73,7 @@ def send_salary_email(to_email, name, month, total):
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s: s.login(S_EMAIL, S_PW); s.send_message(msg); return True
     except: return False
 
-# --- 4. 數據讀取與 429 流量防禦 ---
+# --- 4. 數據讀取與 429 防禦 ---
 @st.cache_data(ttl=120)
 def fetch_all_data():
     try:
@@ -89,19 +89,13 @@ def fetch_all_data():
         df_ot = robust_clean(conn.read(worksheet=OT_SHEET, ttl=30), None, ["日期", "姓名", "時數", "處理方式", "原因", "狀態"])
         try: df_lock = robust_clean(conn.read(worksheet=LOCK_SHEET, ttl=30), None, ["月份", "狀態"])
         except: df_lock = pd.DataFrame(columns=['月份', '狀態'])
-        
-        # 強制數值型態，防止 ValueError
-        for col in ['本月加班時數', '換錢時數', '加班津貼', '補休餘額', '基本薪資合計', '加班時薪']:
-            if col in df_pay.columns: df_pay[col] = pd.to_numeric(df_pay[col], errors='coerce').fillna(0.0)
-            if col in df_emp.columns: df_emp[col] = pd.to_numeric(df_emp[col], errors='coerce').fillna(0.0)
-            
         return df_emp, df_pay, df_ins, df_acc, df_lv, df_ot, df_lock
     except Exception as e:
         if "429" in str(e): st.error("🚨 API 配額用盡，請稍候 30 秒再重新載入網頁。"); st.stop()
         else: raise e
 
 def main():
-    st.title("🚀 天康藥局管理系統 (防彈穩定版)")
+    st.title("🚀 天康藥局管理系統 (穩定版)")
     
     if st.sidebar.button("🔄 同步資料 (清除快取)"): 
         st.cache_data.clear(); st.rerun()
@@ -110,7 +104,7 @@ def main():
         df_emp, df_pay, df_ins, df_acc, df_lv, df_ot, df_lock = fetch_all_data()
         conn = st.connection("gsheets", type=GSheetsConnection)
     except Exception as e:
-        st.error("🚨 系統連線暫時受到限制。請等待約 30 秒後重新載入。")
+        st.error("🚨 系統連線暫時受到 Google 流量限制。請等待約 30 秒後再重新載入網頁。")
         st.stop()
 
     if 'auth' not in st.session_state:
@@ -149,12 +143,12 @@ def main():
                     ins_list.append(v_ins.sort_values('生效月份', ascending=False).iloc[0].reindex(['勞健保個人負擔'], fill_value=0) if not v_ins.empty else pd.Series([0], index=['勞健保個人負擔']))
                 p_pay = pd.concat([p_pay.reset_index(drop=True), pd.DataFrame(ins_list).reset_index(drop=True)], axis=1)
                 b_cols = PHARMACY_VAR if e_info.get('單位') == "藥局" else CASE_MGR_VAR
-                for c in ALL_VAR_COLS + ['勞健保個人負擔', '本月加班時數', '換錢時數']: p_pay[c] = pd.to_numeric(p_pay[c], errors='coerce').fillna(0)
+                for c in ALL_VAR_COLS + ['勞健保個人負擔', '本月加班時數', '換錢時數']: p_pay[c] = pd.to_numeric(p_pay[c], errors='coerce').fillna(0.0)
                 base = clean_val(e_info.get('基本薪資合計', 0)); lic = clean_val(e_info.get('執照津貼', 0)); trans = clean_val(e_info.get('車資補貼', 0))
                 p_pay['基本薪資合計'] = base; p_pay['執照津貼'] = lic; p_pay['車資補貼'] = trans
                 p_pay['實領總額'] = (base + lic + trans + p_pay[b_cols].sum(axis=1) + p_pay['加班津貼']) - p_pay['勞健保個人負擔']
                 st.dataframe(p_pay[['月份', '基本薪資合計', '執照津貼', '車資補貼'] + b_cols + ['本月加班時數', '換錢時數', '加班津貼', '勞健保個人負擔', '實領總額', '備註']], use_container_width=True)
-            else: st.warning("目前無紀錄。")
+            else: st.warning("目前尚無您的紀錄。")
 
         with t2:
             ebal = df_emp[df_emp['姓名']==name].iloc[0] if not df_emp[df_emp['姓名']==name].empty else {}
@@ -202,18 +196,14 @@ def main():
 
                 curr = df_pay[df_pay['月份'].astype(str) == target_m].copy()
                 
-                if role == 1: # --- 老闆視角 ---
-                    # 💡 KeyError 防彈機制：先把重複的欄位從 curr 刪掉，再從 df_emp 乾淨地合併進來
-                    cols_from_emp = ['單位','基本薪資合計','執照津貼','車資補貼','電子郵件','加班時薪', '補休餘額', '店別']
-                    curr = curr.drop(columns=[c for c in cols_from_emp if c in curr.columns], errors='ignore')
+                if role == 1: # --- 老闆全覽視角 ---
+                    # 💡 核心修復：先淨空可能衝突的舊欄位，再 merge，徹底消滅 _x 與 _y 與 KeyError！
+                    drop_cols = ['單位', '店別', '基本薪資合計', '執照津貼', '車資補貼', '電子郵件', '加班時薪', '補休餘額']
+                    curr = curr.drop(columns=[c for c in drop_cols if c in curr.columns], errors='ignore')
+                    curr = curr.merge(df_emp[['姓名'] + drop_cols], on='姓名', how='left')
                     
-                    emp_sub = df_emp[['姓名'] + [c for c in cols_from_emp if c in df_emp.columns]].copy()
-                    curr = curr.merge(emp_sub, on='姓名', how='left')
+                    curr.rename(columns={'補休餘額': '現有補休'}, inplace=True)
                     
-                    if '補休餘額' in curr.columns: curr.rename(columns={'補休餘額': '現有補休'}, inplace=True)
-                    else: curr['現有補休'] = 0.0
-                    
-                    # 抓取最新日保費
                     l_ins_list = []
                     for n in curr['姓名']:
                         v = df_ins[(df_ins['姓名'] == n) & (df_ins['生效月份'].astype(str) <= target_m)] if '生效月份' in df_ins.columns else pd.DataFrame()
@@ -223,15 +213,13 @@ def main():
                     if not ins_df.empty: curr = curr.merge(ins_df, on='姓名', how='left')
                     else: curr['勞健保個人負擔'] = 0.0
                     
-                    # 強制轉數值
+                    # 強制補齊並轉為數字
                     calc_cols = ALL_VAR_COLS + ['基本薪資合計', '勞健保個人負擔', '本月加班時數', '換錢時數', '現有補休', '執照津貼', '車資補貼']
                     for c in calc_cols: 
                         if c not in curr.columns: curr[c] = 0.0
                         curr[c] = pd.to_numeric(curr[c], errors='coerce').fillna(0.0)
                         
                     curr['應付金額'] = (curr['基本薪資合計'] + curr['執照津貼'] + curr['車資補貼'] + curr[ALL_VAR_COLS].sum(axis=1)) - curr['勞健保個人負擔']
-                    
-                    if '單位' not in curr.columns: curr['單位'] = ""
                     
                     st.subheader("💊 藥局組")
                     ed_p = st.data_editor(curr[curr['單位'] == "藥局"][['月份','店別','姓名','現有補休','本月加班時數','換錢時數','基本薪資合計','應付金額','電子郵件'] + PHARMACY_VAR + ['加班津貼','備註']], disabled=["現有補休"] if not is_locked else True, key="bp")
@@ -271,25 +259,20 @@ def main():
                             st.success("✅ 完成")
                 
                 elif role == 3: # --- 💡 店長視角 ---
-                    # 💡 KeyError 防彈機制：乾淨合併
-                    cols_from_emp = ['單位', '店別', '補休餘額', '加班時薪']
-                    mgr_view = curr.copy()
-                    mgr_view = mgr_view.drop(columns=[c for c in cols_from_emp if c in mgr_view.columns], errors='ignore')
-                    
-                    emp_sub = df_emp[['姓名'] + [c for c in cols_from_emp if c in df_emp.columns]].copy()
-                    mgr_view = mgr_view.merge(emp_sub, on='姓名', how='left')
+                    # 💡 核心修復：合併前清空舊欄位，避免 _x 與 _y，徹底解決 KeyError！
+                    drop_cols = ['單位', '店別', '補休餘額']
+                    mgr_view = curr.drop(columns=[c for c in drop_cols if c in curr.columns], errors='ignore')
+                    mgr_view = mgr_view.merge(df_emp[['姓名'] + drop_cols], on='姓名', how='left')
                     
                     if '補休餘額' in mgr_view.columns: mgr_view.rename(columns={'補休餘額': '現有補休'}, inplace=True)
                     else: mgr_view['現有補休'] = 0.0
                     
-                    if '店別' not in mgr_view.columns: mgr_view['店別'] = ""
-                    if '單位' not in mgr_view.columns: mgr_view['單位'] = ""
-                    
-                    # 隔離藥局人員
+                    # 隔離：只看該分店且為藥局的人員
                     mgr_view = mgr_view[(mgr_view['店別'].astype(str).str.zfill(2) == shop) & (mgr_view['單位'] == "藥局")]
                     
                     edit_cols = ["月份", "店別", "姓名", "現有補休", "本月加班時數", "換錢時數"] + PHARMACY_VAR + ["備註"]
                     
+                    # 強制轉型，防止 Streamlit 將欄位反灰鎖死
                     for col in edit_cols:
                         if col not in mgr_view.columns:
                             mgr_view[col] = "" if col in ["月份", "店別", "姓名", "備註"] else 0.0
@@ -314,6 +297,7 @@ def main():
                                     new_add = clean_val(row.get('本月加班時數', 0))
                                     new_cash = clean_val(row.get('換錢時數', 0))
 
+                                    # 差額計算
                                     df_emp.loc[mask_e, '補休餘額'] = clean_val(df_emp.loc[mask_e, '補休餘額'].values[0]) + (new_add - old_add) - (new_cash - old_cash)
                                     df_pay.loc[mask_p, '本月加班時數'] = new_add
                                     df_pay.loc[mask_p, '換錢時數'] = new_cash
