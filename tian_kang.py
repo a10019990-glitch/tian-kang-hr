@@ -16,29 +16,32 @@ LEAVE_SHEET, OT_SHEET = "leave_requests", "ot_requests"
 
 st.set_page_config(page_title="天康藥局雲端管理系統", layout="wide")
 
-# --- 2. 假別定義 ---
+# --- 2. 核心邏輯：勞基法規則 ---
 LEAVE_TYPES = {
     "特休": {"pay_ratio": 0.0, "deduct_balance": "剩餘特休時數"},
     "補休": {"pay_ratio": 0.0, "deduct_balance": "補休餘額"},
     "病假(半薪)": {"pay_ratio": 0.5},
     "生理假(半薪)": {"pay_ratio": 0.5},
     "事假(無薪)": {"pay_ratio": 1.0},
+    "家庭照顧假(無薪)": {"pay_ratio": 1.0},
     "婚假(全薪)": {"pay_ratio": 0.0},
     "喪假(全薪)": {"pay_ratio": 0.0},
     "產假(年資滿半年全薪/未滿半薪)": {"pay_ratio": "Tenure_Depend"},
+    "流產假(年資滿半年全薪/未滿半薪)": {"pay_ratio": "Tenure_Depend"},
     "產檢假(全薪)": {"pay_ratio": 0.0},
     "陪產檢及陪產假(全薪)": {"pay_ratio": 0.0},
+    "產前假(全薪)": {"pay_ratio": 0.0},
     "育嬰留職停薪(無薪)": {"pay_ratio": 1.0}
 }
 
-# --- 3. 核心工具函數 ---
+# --- 3. 工具函數 ---
 def hash_password(password): return hashlib.sha256(str.encode(password)).hexdigest()
 def clean_val(v):
     try: return float(v) if v and str(v).strip() != "" else 0.0
     except: return 0.0
 
 def get_seniority(start_date_str):
-    if not start_date_str or start_date_str == "N/A": return 0
+    if not start_date_str or str(start_date_str) == "N/A": return 0
     try:
         sd = pd.to_datetime(start_date_str)
         return max(0, (datetime.now() - sd).days / 365.25)
@@ -69,9 +72,6 @@ def robust_clean(df, expected_cols=None):
             if k in c: new_cols[c] = v; break
     df = df.rename(columns=new_cols)
     if "姓名" in df.columns: df["姓名"] = df["姓名"].astype(str).str.replace(r'\s+', '', regex=True)
-    if expected_cols:
-        for ec in expected_cols:
-            if ec not in df.columns: df[ec] = 0 if any(x in ec for x in ["時", "額", "金", "負擔"]) else ""
     return df.loc[:, ~df.columns.duplicated()]
 
 def generate_bank_csv(df_source, df_employee, target_m):
@@ -110,8 +110,8 @@ def fetch_all_data():
     return df_emp, df_pay, df_ins, df_acc, df_lv, df_ot, df_lock
 
 def main():
-    st.title("🚀 天康薪資差勤一體化管理系統")
-    if st.sidebar.button("🔄 刷新資料"): st.cache_data.clear(); st.rerun()
+    st.title("🚀 天康連鎖藥局 - 薪資差勤一體化管理系統")
+    if st.sidebar.button("🔄 刷新雲端資料"): st.cache_data.clear(); st.rerun()
 
     try:
         df_emp, df_pay, df_ins, df_acc, df_lv, df_ot, df_lock = fetch_all_data()
@@ -122,9 +122,9 @@ def main():
     ALL_VAR_COLS = list(set(PHARMACY_VAR + CASE_MGR_VAR))
 
     if 'auth' not in st.session_state:
-        mode = st.radio("系統入口", ["管理端登入", "員工入口", "新帳號註冊"], horizontal=True)
+        mode = st.radio("系統入口", ["管理端登入", "員工查詢", "新帳號註冊"], horizontal=True)
         if mode == "管理端登入":
-            acc = st.text_input("帳號"); pw = st.text_input("密碼", type="password")
+            acc = st.text_input("管理帳號"); pw = st.text_input("管理密碼", type="password")
             if st.button("登入"):
                 match = df_acc[(df_acc['帳號'] == acc) & (df_acc['密碼'] == hash_password(pw))]
                 if not match.empty:
@@ -133,102 +133,120 @@ def main():
                     elif acc.startswith("mgr_"): 
                         sid = re.findall(r'\d+', acc); st.session_state.auth, st.session_state.shop = 3, (sid[0].zfill(2) if sid else "00")
                     st.rerun()
-        elif mode == "員工入口":
+        elif mode == "員工查詢":
             e_acc = st.text_input("帳號"); e_pw = st.text_input("密碼", type="password")
             if st.button("登入系統"):
                 m = df_acc[(df_acc['帳號'] == e_acc) & (df_acc['密碼'] == hash_password(e_pw))]
                 if not m.empty: st.session_state.auth, st.session_state.user_name, st.session_state.shop = 5, m.iloc[0]['姓名'], "PERSONAL"; st.rerun()
-        elif mode == "新帳號註冊":
-            with st.form("reg"):
-                n, i, a, p = st.text_input("姓名"), st.text_input("身分證"), st.text_input("帳號"), st.text_input("密碼", type="password")
-                if st.form_submit_button("註冊"):
-                    st.connection("gsheets", type=GSheetsConnection).update(worksheet=ACC_SHEET, data=pd.concat([df_acc, pd.DataFrame({"姓名":[n.replace(" ","")], "身分證":[i], "帳號":[a], "密碼":[hash_password(p)]})], ignore_index=True))
-                    st.cache_data.clear(); st.success("註冊成功")
         return
 
     role, shop = st.session_state.auth, st.session_state.shop
 
-    # --- 5. 員工入口 (修改加班與換錢邏輯) ---
+    # --- 5. 員工專區 (修正查詢不到的問題) ---
     if role == 5:
         name = st.session_state.user_name.replace(" ", "")
         p_ins = df_ins[df_ins['姓名'] == name]
         s_date = str(p_ins.sort_values('加保日期').iloc[0]['加保日期']) if not p_ins.empty else "N/A"
         yrs = get_seniority(s_date); e_info = df_emp[df_emp['姓名'] == name].iloc[0] if not df_emp[df_emp['姓名'] == name].empty else {}
         
-        st.subheader(f"👋 {name} 同仁")
-        st.sidebar.info(f"🎖️ 年資：{yrs:.2f} 年\n🗓️ 加保：{s_date}\n🎁 法定特休：{get_labor_law_special_leave(yrs)} 天")
+        st.subheader(f"👋 {name} 同仁，歡迎查詢資料")
+        st.sidebar.info(f"🎖️ 年資：{yrs:.2f} 年\n🗓️ 入職：{s_date}")
 
-        t1, t2, t3 = st.tabs(["💰 薪資查詢", "📅 加班與請假申請", "🔍 差勤紀錄"])
+        t1, t2, t3 = st.tabs(["💰 薪資單查詢", "📅 加班與請假申請", "🔍 我的差勤紀錄"])
+        
+        with t1: # 薪資查詢修復
+            p_pay = df_pay[df_pay['姓名'] == name].copy()
+            if not p_pay.empty:
+                ins_rows = []
+                for m in p_pay['月份'].astype(str):
+                    v_ins = df_ins[(df_ins['姓名'] == name) & (df_ins['生效月份'].astype(str) <= m)] if '生效月份' in df_ins.columns else pd.DataFrame()
+                    ins_rows.append(v_ins.sort_values('生效月份', ascending=False).iloc[0].reindex(['勞保','健保','勞健保個人負擔'], fill_value=0) if not v_ins.empty else pd.Series([0,0,0], index=['勞保','健保','勞健保個人負擔']))
+                p_pay = pd.concat([p_pay.reset_index(drop=True), pd.DataFrame(ins_rows).reset_index(drop=True)], axis=1)
+                for c in ALL_VAR_COLS + ['勞保','健保','勞健保個人負擔']: p_pay[c] = pd.to_numeric(p_pay[c], errors='coerce').fillna(0)
+                b_cols = PHARMACY_VAR if (e_info.get('單位') == "藥局") else CASE_MGR_VAR
+                p_pay['實領總額'] = (clean_val(e_info.get('基本薪資合計',0)) + clean_val(e_info.get('執照津貼',0)) + clean_val(e_info.get('車資補貼',0)) + p_pay[b_cols].sum(axis=1)) - p_pay['勞健保個人負擔']
+                st.dataframe(p_pay[['月份', '姓名'] + b_cols + ['勞保', '健保', '勞健保個人負擔', '實領總額', '備註']])
+            else: st.warning("目前尚無您的發薪紀錄。")
+
         with t2:
             c1, c2 = st.columns(2)
             with c1:
-                st.markdown("### 🌿 請假與補休")
                 st.metric("補休餘額", f"{clean_val(e_info.get('補休餘額',0))} hr")
                 with st.form("l_f"):
-                    lt = st.selectbox("假別", list(LEAVE_TYPES.keys()))
-                    ld, lh, lr = st.date_input("日期"), st.number_input("小時", 0.5, 8.0, 1.0, 0.5), st.text_area("理由")
-                    if st.form_submit_button("送出請假申請"):
-                        st.connection("gsheets", type=GSheetsConnection).update(worksheet=LEAVE_SHEET, data=pd.concat([df_lv, pd.DataFrame({"日期":[str(ld)],"姓名":[name],"類別":[lt],"時數":[lh],"事由":[lr],"狀態":["待審核"]})], ignore_index=True))
-                        st.cache_data.clear(); st.success("已送審")
-                
+                    lt = st.selectbox("假別", list(LEAVE_TYPES.keys())); ld, lh, lr = st.date_input("請假日期"), st.number_input("小時", 0.5, 8.0, 1.0, 0.5), st.text_area("理由")
+                    if st.form_submit_button("送出假單"):
+                        st.connection("gsheets", type=GSheetsConnection).update(worksheet=LEAVE_SHEET, data=pd.concat([df_lv, pd.DataFrame({"日期":[str(ld)],"姓名":[name],"類別":[lt],"時數":[lh],"事由":[lr],"狀態":["待審核"]})], ignore_index=True)); st.cache_data.clear(); st.success("已送審")
                 st.divider()
-                st.markdown("### 💵 補休轉現金申請")
-                with st.form("payout_f"):
-                    ph = st.number_input("欲換成現金的補休時數", 0.5, clean_val(e_info.get('補休餘額',0)), 1.0, 0.5)
-                    if st.form_submit_button("送出換錢申請"):
-                        st.connection("gsheets", type=GSheetsConnection).update(worksheet=OT_SHEET, data=pd.concat([df_ot, pd.DataFrame({"日期":[str(datetime.now().date())],"姓名":[name],"時數":[ph],"處理方式":["換錢"],"原因":["補休轉薪資"],"狀態":["待審核"]})], ignore_index=True))
-                        st.cache_data.clear(); st.success("換錢申請已送至老闆核准")
-
+                with st.form("p_f"):
+                    st.markdown("### 💵 補休轉現金申請")
+                    ph = st.number_input("轉換時數", 0.5, clean_val(e_info.get('補休餘額',0)), 1.0, 0.5)
+                    if st.form_submit_button("申請核現"):
+                        st.connection("gsheets", type=GSheetsConnection).update(worksheet=OT_SHEET, data=pd.concat([df_ot, pd.DataFrame({"日期":[str(datetime.now().date())],"姓名":[name],"時數":[ph],"處理方式":["換錢"],"原因":["補休核現"],"狀態":["待審核"]})], ignore_index=True)); st.cache_data.clear(); st.success("已送出申請")
             with c2:
-                st.markdown("### ⚡ 加班預約申請")
                 with st.form("ot_f"):
-                    od, oh, orsn = st.date_input("加班日期"), st.number_input("預計小時", 0.5, 12.0, 1.0, 0.5), st.text_area("加班原因")
-                    if st.form_submit_button("送出預約"):
-                        st.connection("gsheets", type=GSheetsConnection).update(worksheet=OT_SHEET, data=pd.concat([df_ot, pd.DataFrame({"日期":[str(od)],"姓名":[name],"時數":[oh],"處理方式":["累積補休"],"原因":[orsn],"狀態":["待審核"]})], ignore_index=True))
-                        st.cache_data.clear(); st.success("預約已送出，請待老闆同意後再行加班。")
+                    st.markdown("### ⚡ 加班預約申請")
+                    od, oh, orsn = st.date_input("預計日期"), st.number_input("小時", 0.5, 12.0, 1.0, 0.5), st.text_area("加班事由")
+                    if st.form_submit_button("預約加班"):
+                        st.connection("gsheets", type=GSheetsConnection).update(worksheet=OT_SHEET, data=pd.concat([df_ot, pd.DataFrame({"日期":[str(od)],"姓名":[name],"時數":[oh],"處理方式":["累積補休"],"原因":[orsn],"狀態":["待審核"]})], ignore_index=True)); st.cache_data.clear(); st.success("預約成功")
+
+        with t3: # 差勤紀錄查詢修復
+            st.markdown("#### 🌿 請假紀錄")
+            st.dataframe(df_lv[df_lv['姓名'] == name], use_container_width=True)
+            st.markdown("#### ⚡ 加班/換錢紀錄")
+            st.dataframe(df_ot[df_ot['姓名'] == name], use_container_width=True)
+        if st.sidebar.button("登出系統"): del st.session_state['auth']; st.rerun()
 
     # --- 6. 管理端 (老闆/店長/會計) ---
     else:
-        if st.sidebar.button("登出系統"): del st.session_state['auth']; st.rerun()
+        if st.sidebar.button("安全登出"): del st.session_state['auth']; st.rerun()
         
-        if role == 4: # 會計 (保全 8 欄位)
-            st.subheader("會計管理：勞健保維護")
+        if role == 4: # 會計保全
+            st.subheader("會計管理專區")
             e_in = st.data_editor(df_ins, num_rows="dynamic")
-            if st.button("💾 更新勞健保"): st.connection("gsheets", type=GSheetsConnection).update(worksheet=INS_SHEET, data=e_in); st.cache_data.clear(); st.success("OK")
+            if st.button("💾 更新資料"): st.connection("gsheets", type=GSheetsConnection).update(worksheet=INS_SHEET, data=e_in); st.cache_data.clear(); st.success("OK")
 
         else: # 老闆 與 店長
-            tabs = st.tabs(["💰 薪資作業", "📑 申請單審核中心", "👤 員工主表", "🏥 勞健保", "🔑 帳號管理"])
+            tabs = st.tabs(["💰 薪資發薪", "📑 申請單審核", "👤 員工資料庫", "🏥 勞健保", "🔑 帳號管理"])
             
             with tabs[0]: # 薪資作業 (保全鎖定與店長保密)
                 all_m = sorted([str(m) for m in df_pay['月份'].dropna().unique()], reverse=True) if '月份' in df_pay.columns else ["無"]
-                target_m = st.sidebar.selectbox("月份", all_m, key="m_box")
+                target_m = st.sidebar.selectbox("發薪月份", all_m, key="m_box")
                 is_locked = any(df_lock[df_lock['月份'].astype(str) == target_m]['狀態'] == "LOCKED") if not df_lock.empty else False
                 
-                if role == 1: # 💡 老闆月份管理復原
-                    with st.sidebar.expander("🛠️ 月份管理"):
-                        new_m = st.text_input("建立新月份", "2026-06")
+                if role == 1: # 💡 老闆月份管理復原 ✅
+                    with st.sidebar.expander("🛠️ 月份管理系統"):
+                        new_m = st.text_input("新增月份 (YYYY-MM)", "2026-06")
                         if st.button("🚀 執行建立"):
-                            new_r = pd.DataFrame({"月份":[new_m]*len(df_emp), "店別":df_emp["店別"], "姓名":df_emp["姓名"]})
+                            l_rem = df_pay.sort_values(['姓名','月份'], ascending=[True,False]).drop_duplicates('姓名')[['姓名','備註']] if not df_pay.empty else pd.DataFrame(columns=['姓名','備註'])
+                            new_r = pd.DataFrame({"月份":[new_m]*len(df_emp), "店別":df_emp["店別"], "姓名":df_emp["姓名"], "備註":df_emp[['姓名']].merge(l_rem, on='姓名', how='left')["備註"].fillna("").tolist()})
                             for c in ALL_VAR_COLS: new_r[c] = 0
                             st.connection("gsheets", type=GSheetsConnection).update(worksheet=PAY_SHEET, data=pd.concat([df_pay, new_r], ignore_index=True)); st.cache_data.clear(); st.rerun()
                         if st.button("🔒 鎖定/🔓 解鎖"):
                             new_s = "OPEN" if is_locked else "LOCKED"; others = df_lock[df_lock['月份'].astype(str) != target_m]
                             st.connection("gsheets", type=GSheetsConnection).update(worksheet=LOCK_SHEET, data=pd.concat([others, pd.DataFrame({"月份":[target_m],"狀態":[new_s]})], ignore_index=True)); st.cache_data.clear(); st.rerun()
+                        del_m = st.selectbox("欲刪除月份", all_m, key="del_box")
+                        if st.button("🔥 執行刪除") and st.checkbox(f"我確認刪除 {del_m}"):
+                            st.connection("gsheets", type=GSheetsConnection).update(worksheet=PAY_SHEET, data=df_pay[df_pay['月份'].astype(str) != del_m]); st.cache_data.clear(); st.rerun()
 
                 curr = df_pay[df_pay['月份'].astype(str) == target_m].copy()
                 if role == 3: curr = curr[curr['姓名'].isin(df_emp[df_emp['店別'].astype(str).str.zfill(2) == shop]['姓名'])]
                 
-                if role == 1: # 老闆視角：保全應付金額
+                if role == 1: # 老闆視角
                     curr = curr.merge(df_emp[['姓名','單位','基本薪資合計','執照津貼','車資補貼','電子郵件','加班時薪']], on='姓名', how='left')
                     l_ins_list = []
                     for n in curr['姓名']:
                         v = df_ins[(df_ins['姓名'] == n) & (df_ins['生效月份'].astype(str) <= target_m)] if '生效月份' in df_ins.columns else pd.DataFrame()
-                        l_ins_list.append(v.sort_values('生效月份', ascending=False).iloc[0].reindex(['姓名','勞健保個人負擔'], fill_value=0) if not v.empty else pd.Series([n, 0], index=['姓名','勞健保個人負擔']))
+                        l_ins_list.append(v.sort_values('生效月份', ascending=False).iloc[0].reindex(['姓名','勞健保個人負擔'], fill_value=0) if not v.empty else pd.Series([n,0], index=['姓名','勞健保個人負擔']))
                     curr = curr.merge(pd.DataFrame(l_ins_list), on='姓名', how='left')
                     for c in ALL_VAR_COLS + ['基本薪資合計','勞健保個人負擔']: curr[c] = pd.to_numeric(curr[c], errors='coerce').fillna(0)
                     curr['應付金額'] = (curr['基本薪資合計'] + clean_val(curr['執照津貼']) + clean_val(curr['車資補貼']) + curr[ALL_VAR_COLS].sum(axis=1)) - curr['勞健保個人負擔']
                     edited = st.data_editor(curr, key="boss_pay_final")
-                else: # 店長視角 (隱藏時薪)
+                    # 📧 Email 發送功能保留 ✅
+                    if st.button("📧 批量寄送本月 Email 明細"):
+                        for _, r in edited.iterrows():
+                            if not pd.isna(r.get('電子郵件')): send_salary_email(r['電子郵件'], r['姓名'], target_m, {"實領總額": r.get('應付金額', 0), "備註": r.get('備註','')})
+                        st.success("✅ 批量發送完成")
+                else: # 💡 店長視角 (隱私保全)
                     mgr_v = curr.merge(df_emp[['姓名','單位']], on='姓名', how='left')
                     disp_l = []
                     for _, r in mgr_v.iterrows():
@@ -237,53 +255,50 @@ def main():
                     final_mgr = pd.DataFrame(disp_l); b_cols = PHARMACY_VAR if (not final_mgr.empty and final_mgr.iloc[0].get('單位') == "藥局") else CASE_MGR_VAR
                     edited = st.data_editor(final_mgr[["月份","店別","姓名"] + [c for c in b_cols if c != "加班津貼"] + ["加班時數","備註"]], disabled=is_locked)
 
-                if st.button("💾 同步存檔") and not (is_locked and role == 3):
+                if st.button("💾 同步存檔資料") and not (is_locked and role == 3):
                     for idx, row in edited.iterrows():
                         rate = clean_val(df_emp[df_emp['姓名'] == row['姓名']].iloc[0].get('加班時薪', 0))
                         if role == 3: df_pay.loc[(df_pay['月份'].astype(str) == target_m) & (df_pay['姓名'] == row['姓名']), '加班津貼'] = round(clean_val(row['加班時數']) * rate)
                         else:
                             for col in edited.columns:
                                 if col in ALL_VAR_COLS or col == "備註": df_pay.loc[(df_pay['月份'].astype(str) == target_m) & (df_pay['姓名'] == row['姓名']), col] = row[col]
-                    st.connection("gsheets", type=GSheetsConnection).update(worksheet=PAY_SHEET, data=df_pay); st.cache_data.clear(); st.success("OK")
+                    st.connection("gsheets", type=GSheetsConnection).update(worksheet=PAY_SHEET, data=df_pay); st.cache_data.clear(); st.success("存檔成功")
 
-            with tabs[1]: # 💡 審核中心：加班預約與換錢邏輯
-                st.subheader("📑 待核准申請")
+            with tabs[1]: # 💡 審核中心：預約加班與換錢
                 if role == 1:
+                    st.subheader("📑 待核准申請")
                     c1, c2 = st.columns(2)
-                    with c1: # 請假
+                    with c1:
                         p_l = df_lv[df_lv['狀態'] == '待審核'] if '狀態' in df_lv.columns else pd.DataFrame()
                         for idx, row in p_l.iterrows():
                             with st.expander(f"🌿 {row.get('姓名')} - {row.get('類別')}"):
-                                if st.button("✅ 核准", key=f"la_{idx}"):
+                                if st.button("✅ 核准假單", key=f"la_{idx}"):
                                     rule = LEAVE_TYPES.get(row['類別'], {})
                                     if rule.get('deduct_balance') in df_emp.columns:
                                         df_emp.loc[df_emp['姓名'] == row['姓名'], rule['deduct_balance']] -= clean_val(row['時數'])
                                         st.connection("gsheets", type=GSheetsConnection).update(worksheet=EMP_SHEET, data=df_emp)
                                     df_lv.at[idx, '狀態'] = '已核准'; st.connection("gsheets", type=GSheetsConnection).update(worksheet=LEAVE_SHEET, data=df_lv); st.cache_data.clear(); st.rerun()
-                    with c2: # 加班與換錢
+                    with c2:
                         p_o = df_ot[df_ot['狀態'] == '待審核'] if '狀態' in df_ot.columns else pd.DataFrame()
                         for idx, row in p_o.iterrows():
                             with st.expander(f"⚡ {row.get('姓名')} - {row.get('處理方式')} ({row.get('時數')}hr)"):
-                                st.write(f"原因：{row.get('原因')}")
                                 if st.button("✅ 同意執行", key=f"oa_{idx}"):
-                                    if row['處理方式'] == '累積補休': # 加班預約通過 -> 加補休
+                                    if row['處理方式'] == '累積補休':
                                         df_emp.loc[df_emp['姓名'] == row['姓名'], '補休餘額'] += clean_val(row['時數'])
                                         st.connection("gsheets", type=GSheetsConnection).update(worksheet=EMP_SHEET, data=df_emp)
-                                    else: # 換錢申請通過 -> 扣補休 + 加加班費
+                                    else: # 換錢：扣補休、加加班費
                                         rate = clean_val(df_emp[df_emp['姓名'] == row['姓名']].iloc[0].get('加班時薪', 0))
-                                        money = round(rate * clean_val(row['時數']))
-                                        target_idx = df_pay.index[(df_pay['月份'].astype(str) == target_m) & (df_pay['姓名'] == row['姓名'])]
-                                        if not target_idx.empty:
-                                            df_pay.at[target_idx[0], '加班津貼'] = clean_val(df_pay.at[target_idx[0], '加班津貼']) + money
+                                        t_idx = df_pay.index[(df_pay['月份'].astype(str) == target_m) & (df_pay['姓名'] == row['姓名'])]
+                                        if not t_idx.empty:
+                                            df_pay.at[t_idx[0], '加班津貼'] = clean_val(df_pay.at[t_idx[0], '加班津貼']) + round(rate * clean_val(row['時數']))
                                             df_emp.loc[df_emp['姓名'] == row['姓名'], '補休餘額'] -= clean_val(row['時數'])
                                             st.connection("gsheets", type=GSheetsConnection).update(worksheet=PAY_SHEET, data=df_pay)
                                             st.connection("gsheets", type=GSheetsConnection).update(worksheet=EMP_SHEET, data=df_emp)
-                                        else: st.error("發薪表找不到該人，請先建立月份"); st.stop()
                                     df_ot.at[idx, '狀態'] = '已執行'; st.connection("gsheets", type=GSheetsConnection).update(worksheet=OT_SHEET, data=df_ot); st.cache_data.clear(); st.rerun()
 
-            with tabs[2]: # 主表
+            with tabs[2]:
                 e_ed = st.data_editor(df_emp, num_rows="dynamic", key="b_main")
-                if st.button("💾 更新員工資料"): st.connection("gsheets", type=GSheetsConnection).update(worksheet=EMP_SHEET, data=e_ed); st.cache_data.clear(); st.success("OK")
+                if st.button("💾 更新員工資料庫"): st.connection("gsheets", type=GSheetsConnection).update(worksheet=EMP_SHEET, data=e_ed); st.cache_data.clear(); st.success("OK")
             with tabs[3]: st.dataframe(df_ins)
             with tabs[4]: st.dataframe(df_acc)
 
