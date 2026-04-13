@@ -21,7 +21,6 @@ PHARMACY_VAR = ['職務加給', '店毛利成長獎金', '推廣獎金', '輔具
 CASE_MGR_VAR = ['電訪', '超額電訪', '家訪', '超額家訪', '三節獎金', '輔具獎金']
 ALL_VAR_COLS = list(set(PHARMACY_VAR + CASE_MGR_VAR + ['加班津貼']))
 
-# 💡 特休與補休獨立扣除對應欄位
 LEAVE_TYPES = {
     "特休": {"deduct": "剩餘特休時數"}, "補休": {"deduct": "補休餘額"},
     "病假(半薪)": {"deduct": None}, "生理假(半薪)": {"deduct": None},
@@ -32,7 +31,7 @@ LEAVE_TYPES = {
     "產前假(全薪)": {"deduct": None}, "育嬰留職停薪(無薪)": {"deduct": None}
 }
 
-# --- 3. 工具函數 ---
+# --- 3. 工具函數與特休計算引擎 ---
 def hash_password(password): return hashlib.sha256(str.encode(password)).hexdigest()
 
 def clean_val(v):
@@ -53,6 +52,28 @@ def robust_clean(df, mapping_dict=None, expected_cols=None):
             if c not in df.columns: df[c] = 0.0 if "時數" in c or "津貼" in c else ""
     if "姓名" in df.columns: df["姓名"] = df["姓名"].astype(str).str.replace(r'\s+', '', regex=True)
     return df.loc[:, ~df.columns.duplicated()]
+
+# 💡 台灣勞基法特休計算引擎 (1天 = 8小時)
+def get_annual_leave_hours(start_date_str):
+    if not start_date_str or pd.isna(start_date_str) or str(start_date_str).strip() == "":
+        return 0.0
+    try:
+        start_date = pd.to_datetime(start_date_str)
+        now = pd.to_datetime(datetime.now().date())
+        days_employed = (now - start_date).days
+        years = days_employed / 365.25
+
+        if years < 0.5: return 0.0
+        elif 0.5 <= years < 1.0: return 3 * 8.0    # 滿半年: 3天
+        elif 1.0 <= years < 2.0: return 7 * 8.0    # 滿1年: 7天
+        elif 2.0 <= years < 3.0: return 10 * 8.0   # 滿2年: 10天
+        elif 3.0 <= years < 5.0: return 14 * 8.0   # 滿3年: 14天
+        elif 5.0 <= years < 10.0: return 15 * 8.0  # 滿5年: 15天
+        else:
+            extra_years = int(years) - 9
+            return min(15 + extra_years, 30) * 8.0 # 滿10年以上，每年加1天，上限30天
+    except:
+        return 0.0
 
 def generate_bank_csv(df_source, df_employee):
     cols_to_add = ['身分證', '收款帳號']
@@ -97,7 +118,7 @@ def fetch_all_data():
         try: df_lock = robust_clean(conn.read(worksheet=LOCK_SHEET, ttl=30), None, ["月份", "狀態"])
         except: df_lock = pd.DataFrame(columns=['月份', '狀態'])
         
-        # 強制數值型態，包含剩餘特休時數
+        # 強制數值型態
         for col in ['本月加班時數', '換錢時數', '加班津貼', '補休餘額', '剩餘特休時數', '基本薪資合計', '加班時薪']:
             if col in df_pay.columns: df_pay[col] = pd.to_numeric(df_pay[col], errors='coerce').fillna(0.0)
             if col in df_emp.columns: df_emp[col] = pd.to_numeric(df_emp[col], errors='coerce').fillna(0.0)
@@ -108,7 +129,7 @@ def fetch_all_data():
         else: raise e
 
 def main():
-    st.title("🚀 天康藥局管理系統 (防彈穩定版)")
+    st.title("🚀 天康藥局管理系統 (特休精算版)")
     
     if st.sidebar.button("🔄 同步資料 (清除快取)"): 
         st.cache_data.clear(); st.rerun()
@@ -166,7 +187,6 @@ def main():
         with t2:
             ebal = df_emp[df_emp['姓名']==name].iloc[0] if not df_emp[df_emp['姓名']==name].empty else {}
             
-            # 💡 特休與補休雙軌顯示
             c1, c2 = st.columns(2)
             c1.metric("🎯 特休餘額", f"{clean_val(ebal.get('剩餘特休時數',0))} hr")
             c2.metric("⚡ 補休餘額", f"{clean_val(ebal.get('補休餘額',0))} hr")
@@ -215,7 +235,6 @@ def main():
                 curr = df_pay[df_pay['月份'].astype(str) == target_m].copy()
                 
                 if role == 1: # --- 老闆視角 ---
-                    # 💡 加入剩餘特休時數並重新命名
                     cols_from_emp = ['單位','基本薪資合計','執照津貼','車資補貼','電子郵件','加班時薪', '補休餘額', '剩餘特休時數', '店別']
                     curr = curr.drop(columns=[c for c in cols_from_emp if c in curr.columns], errors='ignore')
                     
@@ -224,7 +243,6 @@ def main():
                     
                     if '補休餘額' in curr.columns: curr.rename(columns={'補休餘額': '現有補休'}, inplace=True)
                     else: curr['現有補休'] = 0.0
-                    
                     if '剩餘特休時數' in curr.columns: curr.rename(columns={'剩餘特休時數': '現有特休'}, inplace=True)
                     else: curr['現有特休'] = 0.0
                     
@@ -243,7 +261,6 @@ def main():
                         curr[c] = pd.to_numeric(curr[c], errors='coerce').fillna(0.0)
                         
                     curr['應付金額'] = (curr['基本薪資合計'] + curr['執照津貼'] + curr['車資補貼'] + curr[ALL_VAR_COLS].sum(axis=1)) - curr['勞健保個人負擔']
-                    
                     if '單位' not in curr.columns: curr['單位'] = ""
                     
                     st.subheader("💊 藥局組")
@@ -293,7 +310,6 @@ def main():
                     
                     if '補休餘額' in mgr_view.columns: mgr_view.rename(columns={'補休餘額': '現有補休'}, inplace=True)
                     else: mgr_view['現有補休'] = 0.0
-                    
                     if '剩餘特休時數' in mgr_view.columns: mgr_view.rename(columns={'剩餘特休時數': '現有特休'}, inplace=True)
                     else: mgr_view['現有特休'] = 0.0
                     
@@ -340,14 +356,13 @@ def main():
                             conn.update(worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.success("店長存檔完成")
                     else: st.info("本月份該店尚無藥局人員資料。")
 
-        # --- Boss 專屬管理分頁 ---
+        # --- Boss 專屬管理分頁 (💡 新增特休自動發放系統) ---
         if role == 1:
             with tabs[1]:
                 c1, c2 = st.columns(2)
                 with c1:
                     p_l = df_lv[df_lv['狀態'] == '待審核'] if '狀態' in df_lv.columns else pd.DataFrame()
                     for idx, row in p_l.iterrows():
-                        # 💡 依類別動態扣除特休或補休餘額
                         if st.button(f"✅ 核准 {row['姓名']} - {row['類別']}", key=f"la_{idx}"):
                             rule = LEAVE_TYPES.get(row['類別'], {})
                             if rule.get('deduct') in df_emp.columns:
@@ -368,7 +383,20 @@ def main():
                                     conn.update(worksheet=PAY_SHEET, data=df_pay)
                             df_ot.at[idx, '狀態'] = '已執行'; conn.update(worksheet=OT_SHEET, data=df_ot); conn.update(worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.rerun()
 
-            with tabs[2]: st.data_editor(df_emp, num_rows="dynamic", key="b_main")
+            with tabs[2]: 
+                # 💡 老闆專屬的特休自動結算按鈕
+                st.subheader("👤 員工主資料與特休維護")
+                with st.expander("🎁 勞基法特休自動結算系統"):
+                    st.info("系統將依據主表中的「加保日期」(到職日) 自動計算年資，並發放法定特休時數 (1天=8小時)。")
+                    if st.button("⚡ 依勞基法年資發放特休"):
+                        for idx, row in df_emp.iterrows():
+                            new_leave = get_annual_leave_hours(row.get('加保日期'))
+                            df_emp.at[idx, '剩餘特休時數'] = new_leave
+                        conn.update(worksheet=EMP_SHEET, data=df_emp)
+                        st.cache_data.clear(); st.success("✅ 全體員工特休已依年資重新結算並發放完成！請確認下方表格。")
+                
+                st.data_editor(df_emp, num_rows="dynamic", key="b_main")
+                
             with tabs[3]: st.data_editor(df_ins, num_rows="dynamic", key="b_ins")
             with tabs[4]: st.data_editor(df_acc, num_rows="dynamic", key="b_acc")
 
