@@ -21,6 +21,7 @@ PHARMACY_VAR = ['職務加給', '店毛利成長獎金', '推廣獎金', '輔具
 CASE_MGR_VAR = ['電訪', '超額電訪', '家訪', '超額家訪', '三節獎金', '輔具獎金']
 ALL_VAR_COLS = list(set(PHARMACY_VAR + CASE_MGR_VAR + ['加班津貼']))
 
+# 💡 特休與補休獨立扣除對應欄位
 LEAVE_TYPES = {
     "特休": {"deduct": "剩餘特休時數"}, "補休": {"deduct": "補休餘額"},
     "病假(半薪)": {"deduct": None}, "生理假(半薪)": {"deduct": None},
@@ -53,7 +54,6 @@ def robust_clean(df, mapping_dict=None, expected_cols=None):
     if "姓名" in df.columns: df["姓名"] = df["姓名"].astype(str).str.replace(r'\s+', '', regex=True)
     return df.loc[:, ~df.columns.duplicated()]
 
-# 💡 修復 KeyError：預先清理重複欄位，確保合併後不會產生 _x 與 _y
 def generate_bank_csv(df_source, df_employee):
     cols_to_add = ['身分證', '收款帳號']
     df_clean = df_source.drop(columns=[c for c in cols_to_add if c in df_source.columns], errors='ignore')
@@ -97,7 +97,8 @@ def fetch_all_data():
         try: df_lock = robust_clean(conn.read(worksheet=LOCK_SHEET, ttl=30), None, ["月份", "狀態"])
         except: df_lock = pd.DataFrame(columns=['月份', '狀態'])
         
-        for col in ['本月加班時數', '換錢時數', '加班津貼', '補休餘額', '基本薪資合計', '加班時薪']:
+        # 強制數值型態，包含剩餘特休時數
+        for col in ['本月加班時數', '換錢時數', '加班津貼', '補休餘額', '剩餘特休時數', '基本薪資合計', '加班時薪']:
             if col in df_pay.columns: df_pay[col] = pd.to_numeric(df_pay[col], errors='coerce').fillna(0.0)
             if col in df_emp.columns: df_emp[col] = pd.to_numeric(df_emp[col], errors='coerce').fillna(0.0)
             
@@ -160,14 +161,19 @@ def main():
                 p_pay['基本薪資合計'] = base; p_pay['執照津貼'] = lic; p_pay['車資補貼'] = trans
                 p_pay['實領總額'] = (base + lic + trans + p_pay[b_cols].sum(axis=1) + p_pay['加班津貼']) - p_pay['勞健保個人負擔']
                 st.dataframe(p_pay[['月份', '基本薪資合計', '執照津貼', '車資補貼'] + b_cols + ['本月加班時數', '換錢時數', '加班津貼', '勞健保個人負擔', '實領總額', '備註']], use_container_width=True)
-            else: st.warning("目前無紀錄。")
+            else: st.warning("目前尚無您的紀錄。")
 
         with t2:
             ebal = df_emp[df_emp['姓名']==name].iloc[0] if not df_emp[df_emp['姓名']==name].empty else {}
-            st.metric("補休餘額", f"{clean_val(ebal.get('補休餘額',0))} hr")
+            
+            # 💡 特休與補休雙軌顯示
+            c1, c2 = st.columns(2)
+            c1.metric("🎯 特休餘額", f"{clean_val(ebal.get('剩餘特休時數',0))} hr")
+            c2.metric("⚡ 補休餘額", f"{clean_val(ebal.get('補休餘額',0))} hr")
+            
             with st.form("emp_apply"):
                 lt = st.selectbox("申請項目", list(LEAVE_TYPES.keys()) + ["加班預約", "補休轉現金"]); ld, lh, lr = st.date_input("日期"), st.number_input("小時", 0.5, 12.0, 1.0, 0.5), st.text_area("理由")
-                if st.form_submit_button("送出"):
+                if st.form_submit_button("送出申請"):
                     if "加班" in lt: conn.update(worksheet=OT_SHEET, data=pd.concat([df_ot, pd.DataFrame({"日期":[str(ld)],"姓名":[name],"時數":[lh],"處理方式":["累積補休"],"原因":[lr],"狀態":["待審核"]})], ignore_index=True))
                     elif "補休" in lt: conn.update(worksheet=OT_SHEET, data=pd.concat([df_ot, pd.DataFrame({"日期":[str(ld)],"姓名":[name],"時數":[lh],"處理方式":["換錢"],"原因":["補休核現"],"狀態":["待審核"]})], ignore_index=True))
                     else: conn.update(worksheet=LEAVE_SHEET, data=pd.concat([df_lv, pd.DataFrame({"日期":[str(ld)],"姓名":[name],"類別":[lt],"時數":[lh],"事由":[lr],"狀態":["待審核"]})], ignore_index=True))
@@ -209,7 +215,8 @@ def main():
                 curr = df_pay[df_pay['月份'].astype(str) == target_m].copy()
                 
                 if role == 1: # --- 老闆視角 ---
-                    cols_from_emp = ['單位','基本薪資合計','執照津貼','車資補貼','電子郵件','加班時薪', '補休餘額', '店別']
+                    # 💡 加入剩餘特休時數並重新命名
+                    cols_from_emp = ['單位','基本薪資合計','執照津貼','車資補貼','電子郵件','加班時薪', '補休餘額', '剩餘特休時數', '店別']
                     curr = curr.drop(columns=[c for c in cols_from_emp if c in curr.columns], errors='ignore')
                     
                     emp_sub = df_emp[['姓名'] + [c for c in cols_from_emp if c in df_emp.columns]].copy()
@@ -217,6 +224,9 @@ def main():
                     
                     if '補休餘額' in curr.columns: curr.rename(columns={'補休餘額': '現有補休'}, inplace=True)
                     else: curr['現有補休'] = 0.0
+                    
+                    if '剩餘特休時數' in curr.columns: curr.rename(columns={'剩餘特休時數': '現有特休'}, inplace=True)
+                    else: curr['現有特休'] = 0.0
                     
                     l_ins_list = []
                     for n in curr['姓名']:
@@ -227,7 +237,7 @@ def main():
                     if not ins_df.empty: curr = curr.merge(ins_df, on='姓名', how='left')
                     else: curr['勞健保個人負擔'] = 0.0
                     
-                    calc_cols = ALL_VAR_COLS + ['基本薪資合計', '勞健保個人負擔', '本月加班時數', '換錢時數', '現有補休', '執照津貼', '車資補貼']
+                    calc_cols = ALL_VAR_COLS + ['基本薪資合計', '勞健保個人負擔', '本月加班時數', '換錢時數', '現有補休', '現有特休', '執照津貼', '車資補貼']
                     for c in calc_cols: 
                         if c not in curr.columns: curr[c] = 0.0
                         curr[c] = pd.to_numeric(curr[c], errors='coerce').fillna(0.0)
@@ -237,9 +247,9 @@ def main():
                     if '單位' not in curr.columns: curr['單位'] = ""
                     
                     st.subheader("💊 藥局組")
-                    ed_p = st.data_editor(curr[curr['單位'] == "藥局"][['月份','店別','姓名','現有補休','本月加班時數','換錢時數','基本薪資合計','應付金額','電子郵件'] + PHARMACY_VAR + ['加班津貼','備註']], disabled=["現有補休"] if not is_locked else True, key="bp")
+                    ed_p = st.data_editor(curr[curr['單位'] == "藥局"][['月份','店別','姓名','現有特休','現有補休','本月加班時數','換錢時數','基本薪資合計','應付金額','電子郵件'] + PHARMACY_VAR + ['加班津貼','備註']], disabled=["現有特休", "現有補休"] if not is_locked else True, key="bp")
                     st.subheader("📂 個管師組")
-                    ed_c = st.data_editor(curr[curr['單位'] == "個管師"][['月份','店別','姓名','現有補休','本月加班時數','換錢時數','基本薪資合計','應付金額','電子郵件'] + CASE_MGR_VAR + ['加班津貼','備註']], disabled=["現有補休"] if not is_locked else True, key="bc")
+                    ed_c = st.data_editor(curr[curr['單位'] == "個管師"][['月份','店別','姓名','現有特休','現有補休','本月加班時數','換錢時數','基本薪資合計','應付金額','電子郵件'] + CASE_MGR_VAR + ['加班津貼','備註']], disabled=["現有特休", "現有補休"] if not is_locked else True, key="bc")
                     
                     if st.button("💾 老闆同步存檔") and not is_locked:
                         for _, r in pd.concat([ed_p, ed_c]).iterrows():
@@ -274,7 +284,7 @@ def main():
                             st.success("✅ 完成")
                 
                 elif role == 3: # --- 💡 店長視角 ---
-                    cols_from_emp = ['單位', '店別', '補休餘額', '加班時薪']
+                    cols_from_emp = ['單位', '店別', '補休餘額', '剩餘特休時數', '加班時薪']
                     mgr_view = curr.copy()
                     mgr_view = mgr_view.drop(columns=[c for c in cols_from_emp if c in mgr_view.columns], errors='ignore')
                     
@@ -284,12 +294,15 @@ def main():
                     if '補休餘額' in mgr_view.columns: mgr_view.rename(columns={'補休餘額': '現有補休'}, inplace=True)
                     else: mgr_view['現有補休'] = 0.0
                     
+                    if '剩餘特休時數' in mgr_view.columns: mgr_view.rename(columns={'剩餘特休時數': '現有特休'}, inplace=True)
+                    else: mgr_view['現有特休'] = 0.0
+                    
                     if '店別' not in mgr_view.columns: mgr_view['店別'] = ""
                     if '單位' not in mgr_view.columns: mgr_view['單位'] = ""
                     
                     mgr_view = mgr_view[(mgr_view['店別'].astype(str).str.zfill(2) == shop) & (mgr_view['單位'] == "藥局")]
                     
-                    edit_cols = ["月份", "店別", "姓名", "現有補休", "本月加班時數", "換錢時數"] + PHARMACY_VAR + ["備註"]
+                    edit_cols = ["月份", "店別", "姓名", "現有特休", "現有補休", "本月加班時數", "換錢時數"] + PHARMACY_VAR + ["備註"]
                     
                     for col in edit_cols:
                         if col not in mgr_view.columns:
@@ -299,7 +312,7 @@ def main():
                     
                     st.subheader("💰 藥局發薪作業 (店長權限 - 個管師已隱藏)")
                     if not mgr_view.empty:
-                        lock_state = edit_cols if is_locked else ["月份", "店別", "姓名", "現有補休"]
+                        lock_state = edit_cols if is_locked else ["月份", "店別", "姓名", "現有特休", "現有補休"]
                         ed_mgr = st.data_editor(mgr_view[edit_cols], disabled=lock_state, key="mp")
                         
                         if st.button("💾 店長存檔同步") and not is_locked:
@@ -334,6 +347,7 @@ def main():
                 with c1:
                     p_l = df_lv[df_lv['狀態'] == '待審核'] if '狀態' in df_lv.columns else pd.DataFrame()
                     for idx, row in p_l.iterrows():
+                        # 💡 依類別動態扣除特休或補休餘額
                         if st.button(f"✅ 核准 {row['姓名']} - {row['類別']}", key=f"la_{idx}"):
                             rule = LEAVE_TYPES.get(row['類別'], {})
                             if rule.get('deduct') in df_emp.columns:
