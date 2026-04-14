@@ -136,7 +136,7 @@ def fetch_all_data():
         else: raise e
 
 def main():
-    st.title("🚀 天康藥局管理系統 (薪資全明細防彈版)")
+    st.title("🚀 天康藥局管理系統")
     if st.sidebar.button("🔄 同步資料 (清除快取)"): st.cache_data.clear(); st.rerun()
 
     try:
@@ -230,7 +230,7 @@ def main():
                 
                 if role == 1: # --- 老闆視角 ---
                     cols_from_emp = ['單位','基本薪資合計','執照津貼','車資補貼','電子郵件','加班時薪', '補休餘額', '剩餘特休時數', '店別']
-                    curr = curr.drop(columns=[c for c in cols_from_emp if c in curr.columns], errors='ignore')
+                    curr = curr.drop(columns=[c for c in curr.columns if c in cols_from_emp], errors='ignore')
                     curr = curr.merge(df_emp[['姓名'] + [c for c in cols_from_emp if c in df_emp.columns]], on='姓名', how='left')
                     curr.rename(columns={'補休餘額': '現有補休', '剩餘特休時數': '現有特休'}, inplace=True)
                     
@@ -247,7 +247,6 @@ def main():
                     curr['應付金額'] = (curr['基本薪資合計'] + curr['執照津貼'] + curr['車資補貼'] + curr[ALL_VAR_COLS].sum(axis=1)) - curr['勞健保個人負擔']
                     
                     st.subheader("💊 藥局組")
-                    # 💡 將「勞健保個人負擔」加進顯示表格中，確保後續抓得到資料
                     ed_p = st.data_editor(curr[curr['單位'] == "藥局"][['月份','店別','姓名','現有特休','現有補休','本月加班時數','換錢時數','基本薪資合計','勞健保個人負擔','應付金額','電子郵件'] + PHARMACY_VAR + ['加班津貼','備註']], disabled=["現有特休", "現有補休", "勞健保個人負擔"] if not is_locked else True, key="bp")
                     st.subheader("📂 個管師組")
                     ed_c = st.data_editor(curr[curr['單位'] == "個管師"][['月份','店別','姓名','現有特休','現有補休','本月加班時數','換錢時數','基本薪資合計','勞健保個人負擔','應付金額','電子郵件'] + CASE_MGR_VAR + ['加班津貼','備註']], disabled=["現有特休", "現有補休", "勞健保個人負擔"] if not is_locked else True, key="bc")
@@ -266,7 +265,6 @@ def main():
                                     if col != '加班津貼' and col in r: df_pay.loc[mask_p, col] = r[col]
                         conn.update(worksheet=PAY_SHEET, data=df_pay); conn.update(worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.success("完成")
                     
-                    # 💡 Email 按鈕雙軌分流
                     c1, c2, c3, c4 = st.columns(4)
                     with c1: st.download_button("📥 藥局 CSV", generate_bank_csv(curr[curr['單位'] == "藥局"], df_emp), f"Phar_{target_m}.csv")
                     with c2: st.download_button("📥 個管師 CSV", generate_bank_csv(curr[curr['單位'] == "個管師"], df_emp), f"Case_{target_m}.csv")
@@ -354,8 +352,19 @@ def main():
                         for idx, row in df_emp.iterrows():
                             df_emp.at[idx, '剩餘特休時數'] = get_annual_leave_hours(row.get('加保日期'))
                         conn.update(worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.success("✅ 結算完成")
-                st.data_editor(df_emp, num_rows="dynamic", key="b_main")
-            with tabs[3]: st.data_editor(df_ins, num_rows="dynamic", key="b_ins")
+                
+                # 💡 新增：老闆的員工資料儲存按鈕
+                ed_emp = st.data_editor(df_emp, num_rows="dynamic", key="b_main")
+                if st.button("💾 儲存員工資料更新"):
+                    conn.update(worksheet=EMP_SHEET, data=ed_emp); st.cache_data.clear(); st.success("✅ 員工資料已更新！")
+
+            with tabs[3]:
+                st.subheader("🏥 勞健保紀錄維護")
+                # 💡 新增：老闆的勞健保資料儲存按鈕
+                ed_ins_boss = st.data_editor(df_ins, num_rows="dynamic", key="b_ins")
+                if st.button("💾 儲存勞健保更新"):
+                    conn.update(worksheet=INS_SHEET, data=ed_ins_boss); st.cache_data.clear(); st.success("✅ 勞健保資料已更新！")
+
             with tabs[4]: st.data_editor(df_acc, num_rows="dynamic", key="b_acc")
 
         if role == 4:
