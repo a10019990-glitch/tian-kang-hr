@@ -53,7 +53,6 @@ def robust_clean(df, mapping_dict=None, expected_cols=None):
     if "姓名" in df.columns: df["姓名"] = df["姓名"].astype(str).str.replace(r'\s+', '', regex=True)
     return df.loc[:, ~df.columns.duplicated()]
 
-# 💡 勞基法特休計算引擎
 def get_annual_leave_hours(start_date_str):
     if not start_date_str or pd.isna(start_date_str) or str(start_date_str).strip() == "": return 0.0
     try:
@@ -80,7 +79,6 @@ def generate_bank_csv(df_source, df_employee):
     })
     return bank.to_csv(index=False).encode('utf-8-sig')
 
-# 💡 重新歸位：全明細 HTML Email 寄送模組
 def send_salary_email(to_email, name, month, details_dict):
     S_EMAIL, S_PW = "a10019990@gmail.com", "aczy dkos wjnd cgkm"
     msg = MIMEMultipart(); msg["From"] = f"天康藥局管理部 <{S_EMAIL}>"; msg["To"] = str(to_email)
@@ -249,9 +247,10 @@ def main():
                     curr['應付金額'] = (curr['基本薪資合計'] + curr['執照津貼'] + curr['車資補貼'] + curr[ALL_VAR_COLS].sum(axis=1)) - curr['勞健保個人負擔']
                     
                     st.subheader("💊 藥局組")
-                    ed_p = st.data_editor(curr[curr['單位'] == "藥局"][['月份','店別','姓名','現有特休','現有補休','本月加班時數','換錢時數','基本薪資合計','應付金額','電子郵件'] + PHARMACY_VAR + ['加班津貼','備註']], disabled=["現有特休", "現有補休"] if not is_locked else True, key="bp")
+                    # 💡 將「勞健保個人負擔」加進顯示表格中，確保後續抓得到資料
+                    ed_p = st.data_editor(curr[curr['單位'] == "藥局"][['月份','店別','姓名','現有特休','現有補休','本月加班時數','換錢時數','基本薪資合計','勞健保個人負擔','應付金額','電子郵件'] + PHARMACY_VAR + ['加班津貼','備註']], disabled=["現有特休", "現有補休", "勞健保個人負擔"] if not is_locked else True, key="bp")
                     st.subheader("📂 個管師組")
-                    ed_c = st.data_editor(curr[curr['單位'] == "個管師"][['月份','店別','姓名','現有特休','現有補休','本月加班時數','換錢時數','基本薪資合計','應付金額','電子郵件'] + CASE_MGR_VAR + ['加班津貼','備註']], disabled=["現有特休", "現有補休"] if not is_locked else True, key="bc")
+                    ed_c = st.data_editor(curr[curr['單位'] == "個管師"][['月份','店別','姓名','現有特休','現有補休','本月加班時數','換錢時數','基本薪資合計','勞健保個人負擔','應付金額','電子郵件'] + CASE_MGR_VAR + ['加班津貼','備註']], disabled=["現有特休", "現有補休", "勞健保個人負擔"] if not is_locked else True, key="bc")
                     
                     if st.button("💾 老闆同步存檔") and not is_locked:
                         for _, r in pd.concat([ed_p, ed_c]).iterrows():
@@ -267,33 +266,30 @@ def main():
                                     if col != '加班津貼' and col in r: df_pay.loc[mask_p, col] = r[col]
                         conn.update(worksheet=PAY_SHEET, data=df_pay); conn.update(worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.success("完成")
                     
-                    c1, c2, c3 = st.columns(3)
+                    # 💡 Email 按鈕雙軌分流
+                    c1, c2, c3, c4 = st.columns(4)
                     with c1: st.download_button("📥 藥局 CSV", generate_bank_csv(curr[curr['單位'] == "藥局"], df_emp), f"Phar_{target_m}.csv")
                     with c2: st.download_button("📥 個管師 CSV", generate_bank_csv(curr[curr['單位'] == "個管師"], df_emp), f"Case_{target_m}.csv")
-                    
-                    # 💡 全明細 Email 動態字典發送模組
                     with c3:
-                        if st.button("📧 批量寄送 Email 全明細"):
+                        if st.button("📧 寄送藥局 Email"):
                             count = 0
-                            for _, r in pd.concat([ed_p, ed_c]).iterrows():
+                            for _, r in ed_p.iterrows():
                                 if not pd.isna(r.get('電子郵件')) and str(r.get('電子郵件')).strip() != "":
-                                    b_cols = PHARMACY_VAR if r['姓名'] in ed_p['姓名'].values else CASE_MGR_VAR
-                                    d = {
-                                        "基本薪資": r.get('基本薪資合計', 0), 
-                                        "執照津貼": r.get('執照津貼', 0), 
-                                        "車資補貼": r.get('車資補貼', 0)
-                                    }
-                                    for b in b_cols: d[b] = r.get(b, 0)
-                                    d.update({
-                                        "本月加班時數": r.get('本月加班時數', 0), 
-                                        "換錢時數": r.get('換錢時數', 0), 
-                                        "加班費津貼": r.get('加班津貼', 0), 
-                                        "勞健保扣款": r.get('勞健保個人負擔', 0), 
-                                        "實領總額": r.get('應付金額', 0), 
-                                        "備註說明": r.get('備註', '')
-                                    })
+                                    d = {"基本薪資": r.get('基本薪資合計', 0), "執照津貼": r.get('執照津貼', 0), "車資補貼": r.get('車資補貼', 0)}
+                                    for b in PHARMACY_VAR: d[b] = r.get(b, 0)
+                                    d.update({"本月加班時數": r.get('本月加班時數', 0), "換錢時數": r.get('換錢時數', 0), "加班費津貼": r.get('加班津貼', 0), "勞健保扣款": r.get('勞健保個人負擔', 0), "實領總額": r.get('應付金額', 0), "備註說明": r.get('備註', '')})
                                     if send_salary_email(r['電子郵件'], r['姓名'], target_m, d): count += 1
-                            st.success(f"✅ 已成功發送 {count} 封薪資全明細郵件！")
+                            st.success(f"✅ 已成功發送 {count} 封【藥局】薪資明細郵件！")
+                    with c4:
+                        if st.button("📧 寄送個管師 Email"):
+                            count = 0
+                            for _, r in ed_c.iterrows():
+                                if not pd.isna(r.get('電子郵件')) and str(r.get('電子郵件')).strip() != "":
+                                    d = {"基本薪資": r.get('基本薪資合計', 0), "執照津貼": r.get('執照津貼', 0), "車資補貼": r.get('車資補貼', 0)}
+                                    for b in CASE_MGR_VAR: d[b] = r.get(b, 0)
+                                    d.update({"本月加班時數": r.get('本月加班時數', 0), "換錢時數": r.get('換錢時數', 0), "加班費津貼": r.get('加班津貼', 0), "勞健保扣款": r.get('勞健保個人負擔', 0), "實領總額": r.get('應付金額', 0), "備註說明": r.get('備註', '')})
+                                    if send_salary_email(r['電子郵件'], r['姓名'], target_m, d): count += 1
+                            st.success(f"✅ 已成功發送 {count} 封【個管師】薪資明細郵件！")
 
                 elif role == 3: # --- 店長視角 ---
                     cols_from_emp = ['單位', '店別', '補休餘額', '剩餘特休時數', '加班時薪']
