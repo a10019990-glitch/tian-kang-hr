@@ -117,7 +117,8 @@ def send_salary_email(to_email, name, month, details_dict):
 def fetch_all_data():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        std_map = {"月份": "月份", "姓名": "姓名", "身分證": "身分證", "加保日期": "加保日期", "補休餘額": "補休餘額", "剩餘特休時數": "剩餘特休時數", "加班時薪": "加班時薪", "基本薪資合計": "基本薪資合計", "單位": "單位", "店別": "店別", "生效月份": "生效月份", "執照津貼": "執照津貼", "車資補貼": "車資補貼", "電子郵件": "電子郵件", "收款帳號": "收款帳號"}
+        # 💡 新增 累計應得特休 欄位追蹤
+        std_map = {"月份": "月份", "姓名": "姓名", "身分證": "身分證", "加保日期": "加保日期", "補休餘額": "補休餘額", "剩餘特休時數": "剩餘特休時數", "累計應得特休": "累計應得特休", "加班時薪": "加班時薪", "基本薪資合計": "基本薪資合計", "單位": "單位", "店別": "店別", "生效月份": "生效月份", "執照津貼": "執照津貼", "車資補貼": "車資補貼", "電子郵件": "電子郵件", "收款帳號": "收款帳號"}
         std_cols = list(std_map.values())
         df_emp = robust_clean(conn.read(worksheet=EMP_SHEET, ttl=30), std_map, std_cols)
         df_pay = robust_clean(conn.read(worksheet=PAY_SHEET, ttl=30), std_map, std_cols + ['本月加班時數', '換錢時數', '加班津貼'] + ALL_VAR_COLS)
@@ -127,7 +128,8 @@ def fetch_all_data():
         df_ot = robust_clean(conn.read(worksheet=OT_SHEET, ttl=30), None, ["日期", "姓名", "時數", "處理方式", "狀態"])
         try: df_lock = robust_clean(conn.read(worksheet=LOCK_SHEET, ttl=30), None, ["月份", "狀態"])
         except: df_lock = pd.DataFrame(columns=['月份', '狀態'])
-        for col in ['本月加班時數', '換錢時數', '加班津貼', '補休餘額', '剩餘特休時數', '基本薪資合計', '加班時薪']:
+        
+        for col in ['本月加班時數', '換錢時數', '加班津貼', '補休餘額', '剩餘特休時數', '累計應得特休', '基本薪資合計', '加班時薪']:
             if col in df_pay.columns: df_pay[col] = pd.to_numeric(df_pay[col], errors='coerce').fillna(0.0)
             if col in df_emp.columns: df_emp[col] = pd.to_numeric(df_emp[col], errors='coerce').fillna(0.0)
         return df_emp, df_pay, df_ins, df_acc, df_lv, df_ot, df_lock
@@ -136,7 +138,7 @@ def fetch_all_data():
         else: raise e
 
 def main():
-    st.title("🚀 天康藥局管理系統")
+    st.title("🚀 天康藥局管理系統 (防呆全功能版)")
     if st.sidebar.button("🔄 同步資料 (清除快取)"): st.cache_data.clear(); st.rerun()
 
     try:
@@ -347,20 +349,39 @@ def main():
 
             with tabs[2]:
                 st.subheader("👤 員工主資料與特休維護")
-                with st.expander("🎁 勞基法特休自動結算系統"):
-                    if st.button("⚡ 依勞基法年資結算特休"):
-                        for idx, row in df_emp.iterrows():
-                            df_emp.at[idx, '剩餘特休時數'] = get_annual_leave_hours(row.get('加保日期'))
-                        conn.update(worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.success("✅ 結算完成")
                 
-                # 💡 新增：老闆的員工資料儲存按鈕
+                # 💡 終極防呆：特休結算追蹤系統
+                with st.expander("🎁 勞基法特休自動結算系統"):
+                    st.info("💡 系統會追蹤每人的「累計應得特休」。只有當年資跨階（如滿半年變一年），才會把「新增時數」加進餘額裡。重複點擊絕對不會洗掉已請假的扣除紀錄！")
+                    if st.button("⚡ 依勞基法年資結算特休"):
+                        count = 0
+                        for idx, row in df_emp.iterrows():
+                            current_entitlement = get_annual_leave_hours(row.get('加保日期'))
+                            historical_entitlement = clean_val(row.get('累計應得特休', 0))
+                            
+                            if historical_entitlement == 0:
+                                if clean_val(row.get('剩餘特休時數', 0)) == 0:
+                                    df_emp.at[idx, '剩餘特休時數'] = current_entitlement
+                                df_emp.at[idx, '累計應得特休'] = current_entitlement
+                                count += 1
+                            elif current_entitlement > historical_entitlement:
+                                diff = current_entitlement - historical_entitlement
+                                df_emp.at[idx, '剩餘特休時數'] = clean_val(row.get('剩餘特休時數', 0)) + diff
+                                df_emp.at[idx, '累計應得特休'] = current_entitlement
+                                count += 1
+                        
+                        if count > 0:
+                            conn.update(worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear()
+                            st.success(f"✅ 結算完成！共有 {count} 位同仁的特休獲得更新或補發。")
+                        else:
+                            st.warning("目前所有同仁的特休時數皆已符合年資標準，無需重複發放。")
+                
                 ed_emp = st.data_editor(df_emp, num_rows="dynamic", key="b_main")
                 if st.button("💾 儲存員工資料更新"):
                     conn.update(worksheet=EMP_SHEET, data=ed_emp); st.cache_data.clear(); st.success("✅ 員工資料已更新！")
 
             with tabs[3]:
                 st.subheader("🏥 勞健保紀錄維護")
-                # 💡 新增：老闆的勞健保資料儲存按鈕
                 ed_ins_boss = st.data_editor(df_ins, num_rows="dynamic", key="b_ins")
                 if st.button("💾 儲存勞健保更新"):
                     conn.update(worksheet=INS_SHEET, data=ed_ins_boss); st.cache_data.clear(); st.success("✅ 勞健保資料已更新！")
