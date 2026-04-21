@@ -73,7 +73,7 @@ def generate_bank_csv(df_source, df_employee):
     emp_sub = df_employee[['姓名'] + [c for c in cols_to_add if c in df_employee.columns]].drop_duplicates('姓名')
     f_df = df_clean.merge(emp_sub, on='姓名', how='left')
     bank = pd.DataFrame({
-        "付款日期": datetime.now().strftime("%Y%m%d"), "轉帳項目": "901", "企業編號": "5917",
+        "付款日期": datetime.now().strftime("%Y%m%d"), "轉帳項目": "901", "企業編號": "75440263",
         "員工姓名": f_df["姓名"], "身分證字號": f_df.get("身分證",""), "收款帳號": f_df.get("收款帳號",""),
         "交易金額": f_df.get("應付金額", 0), "附言": "轉帳存入", "付款性質": "轉帳存入"
     })
@@ -117,13 +117,12 @@ def send_salary_email(to_email, name, month, details_dict):
 def fetch_all_data():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        # 💡 新增 累計應得特休 欄位追蹤
         std_map = {"月份": "月份", "姓名": "姓名", "身分證": "身分證", "加保日期": "加保日期", "補休餘額": "補休餘額", "剩餘特休時數": "剩餘特休時數", "累計應得特休": "累計應得特休", "加班時薪": "加班時薪", "基本薪資合計": "基本薪資合計", "單位": "單位", "店別": "店別", "生效月份": "生效月份", "執照津貼": "執照津貼", "車資補貼": "車資補貼", "電子郵件": "電子郵件", "收款帳號": "收款帳號"}
         std_cols = list(std_map.values())
         df_emp = robust_clean(conn.read(worksheet=EMP_SHEET, ttl=30), std_map, std_cols)
         df_pay = robust_clean(conn.read(worksheet=PAY_SHEET, ttl=30), std_map, std_cols + ['本月加班時數', '換錢時數', '加班津貼'] + ALL_VAR_COLS)
         df_ins = robust_clean(conn.read(worksheet=INS_SHEET, ttl=30), std_map, std_cols + ['勞健保個人負擔'])
-        df_acc = robust_clean(conn.read(worksheet=ACC_SHEET, ttl=30), None, ["帳號", "密碼", "姓名"])
+        df_acc = robust_clean(conn.read(worksheet=ACC_SHEET, ttl=30), None, ["帳號", "密碼", "姓名", "身分證"])
         df_lv = robust_clean(conn.read(worksheet=LEAVE_SHEET, ttl=30), None, ["日期", "姓名", "類別", "時數", "狀態"])
         df_ot = robust_clean(conn.read(worksheet=OT_SHEET, ttl=30), None, ["日期", "姓名", "時數", "處理方式", "狀態"])
         try: df_lock = robust_clean(conn.read(worksheet=LOCK_SHEET, ttl=30), None, ["月份", "狀態"])
@@ -138,7 +137,7 @@ def fetch_all_data():
         else: raise e
 
 def main():
-    st.title("🚀 天康藥局管理系統 ")
+    st.title("🚀 天康藥局管理系統 (防呆全功能版)")
     if st.sidebar.button("🔄 同步資料 (清除快取)"): st.cache_data.clear(); st.rerun()
 
     try:
@@ -163,6 +162,35 @@ def main():
             if st.button("登入查詢"):
                 m = df_acc[(df_acc['帳號'] == e_acc) & (df_acc['密碼'] == hash_password(e_pw))]
                 if not m.empty: st.session_state.auth, st.session_state.user_name, st.session_state.shop = 5, m.iloc[0]['姓名'], "PERSONAL"; st.rerun()
+        
+        # 💡 重新歸位：新帳號註冊區塊
+        elif mode == "新帳號註冊":
+            st.subheader("📝 註冊員工專區帳號")
+            with st.form("reg_form"):
+                new_acc = st.text_input("設定登入帳號 (建議使用英文+數字)")
+                new_pw = st.text_input("設定登入密碼", type="password")
+                confirm_pw = st.text_input("確認密碼", type="password")
+                new_name = st.text_input("真實姓名 (需與發薪表完全一致)")
+                new_id = st.text_input("身分證字號")
+                
+                if st.form_submit_button("送出註冊"):
+                    if not new_acc or not new_pw or not new_name or not new_id:
+                        st.warning("⚠️ 所有欄位皆為必填！")
+                    elif new_pw != confirm_pw:
+                        st.warning("⚠️ 兩次輸入的密碼不一致！")
+                    elif new_acc in df_acc['帳號'].values:
+                        st.warning("⚠️ 此帳號已被使用，請更換一個。")
+                    else:
+                        new_user = pd.DataFrame({
+                            "帳號": [new_acc],
+                            "密碼": [hash_password(new_pw)],
+                            "姓名": [new_name.replace(" ", "")],
+                            "身分證": [new_id]
+                        })
+                        updated_acc = pd.concat([df_acc, new_user], ignore_index=True)
+                        conn.update(worksheet=ACC_SHEET, data=updated_acc)
+                        st.cache_data.clear()
+                        st.success("✅ 註冊成功！請將畫面上方的「系統入口」切換至【員工查詢】即可登入。")
         return
 
     role, shop = st.session_state.auth, st.session_state.shop
@@ -350,7 +378,6 @@ def main():
             with tabs[2]:
                 st.subheader("👤 員工主資料與特休維護")
                 
-                # 💡 終極防呆：特休結算追蹤系統
                 with st.expander("🎁 勞基法特休自動結算系統"):
                     st.info("💡 系統會追蹤每人的「累計應得特休」。只有當年資跨階（如滿半年變一年），才會把「新增時數」加進餘額裡。重複點擊絕對不會洗掉已請假的扣除紀錄！")
                     if st.button("⚡ 依勞基法年資結算特休"):
