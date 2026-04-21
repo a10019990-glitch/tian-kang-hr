@@ -137,7 +137,7 @@ def fetch_all_data():
         else: raise e
 
 def main():
-    st.title("🚀 天康藥局管理系統 (防呆全功能版)")
+    st.title("🚀 天康藥局管理系統")
     if st.sidebar.button("🔄 同步資料 (清除快取)"): st.cache_data.clear(); st.rerun()
 
     try:
@@ -153,9 +153,15 @@ def main():
             if st.button("登入管理"):
                 match = df_acc[(df_acc['帳號'] == acc) & (df_acc['密碼'] == hash_password(pw))]
                 if not match.empty:
-                    if acc == "boss": st.session_state.auth, st.session_state.shop = 1, "ALL"
-                    elif acc == "acct": st.session_state.auth, st.session_state.shop = 4, "ACCOUNTING"
-                    elif acc.startswith("mgr_"): sid = re.findall(r'\d+', acc); st.session_state.auth, st.session_state.shop = 3, (sid[0].zfill(2) if sid else "00")
+                    if acc == "boss": st.session_state.auth, st.session_state.shop, st.session_state.mgr_type = 1, "ALL", "ALL"
+                    elif acc == "acct": st.session_state.auth, st.session_state.shop, st.session_state.mgr_type = 4, "ACCOUNTING", "ALL"
+                    elif acc.startswith("mgr_"): 
+                        sid = re.findall(r'\d+', acc)
+                        st.session_state.auth, st.session_state.shop, st.session_state.mgr_type = 3, (sid[0].zfill(2) if sid else "00"), "藥局"
+                    # 💡 判斷是否為「個管師主管」
+                    elif acc.startswith("cmgr_"): 
+                        sid = re.findall(r'\d+', acc)
+                        st.session_state.auth, st.session_state.shop, st.session_state.mgr_type = 3, (sid[0].zfill(2) if sid else "00"), "個管師"
                     st.rerun()
         elif mode == "員工查詢":
             e_acc = st.text_input("員工帳號"); e_pw = st.text_input("密碼", type="password")
@@ -163,11 +169,11 @@ def main():
                 m = df_acc[(df_acc['帳號'] == e_acc) & (df_acc['密碼'] == hash_password(e_pw))]
                 if not m.empty: st.session_state.auth, st.session_state.user_name, st.session_state.shop = 5, m.iloc[0]['姓名'], "PERSONAL"; st.rerun()
         
-        # 💡 重新歸位：新帳號註冊區塊
         elif mode == "新帳號註冊":
             st.subheader("📝 註冊員工專區帳號")
             with st.form("reg_form"):
                 new_acc = st.text_input("設定登入帳號 (建議使用英文+數字)")
+                st.caption("※ 藥局店長請以 `mgr_` 開頭；個管師主管請以 `cmgr_` 開頭")
                 new_pw = st.text_input("設定登入密碼", type="password")
                 confirm_pw = st.text_input("確認密碼", type="password")
                 new_name = st.text_input("真實姓名 (需與發薪表完全一致)")
@@ -190,7 +196,7 @@ def main():
                         updated_acc = pd.concat([df_acc, new_user], ignore_index=True)
                         conn.update(worksheet=ACC_SHEET, data=updated_acc)
                         st.cache_data.clear()
-                        st.success("✅ 註冊成功！請將畫面上方的「系統入口」切換至【員工查詢】即可登入。")
+                        st.success("✅ 註冊成功！請將畫面上方的「系統入口」切換至【員工查詢】或【管理端登入】。")
         return
 
     role, shop = st.session_state.auth, st.session_state.shop
@@ -319,23 +325,28 @@ def main():
                                     if send_salary_email(r['電子郵件'], r['姓名'], target_m, d): count += 1
                             st.success(f"✅ 已成功發送 {count} 封【個管師】薪資明細郵件！")
 
-                elif role == 3: # --- 店長視角 ---
+                elif role == 3: # --- 💡 主管雙軌視角 ---
+                    mgr_type = st.session_state.mgr_type
                     cols_from_emp = ['單位', '店別', '補休餘額', '剩餘特休時數', '加班時薪']
                     mgr_view = curr.copy()
                     mgr_view = mgr_view.drop(columns=[c for c in cols_from_emp if c in mgr_view.columns], errors='ignore')
                     mgr_view = mgr_view.merge(df_emp[['姓名'] + [c for c in cols_from_emp if c in df_emp.columns]], on='姓名', how='left')
                     mgr_view.rename(columns={'補休餘額': '現有補休', '剩餘特休時數': '現有特休'}, inplace=True)
                     
-                    mgr_view = mgr_view[(mgr_view['店別'].astype(str).str.zfill(2) == shop) & (mgr_view['單位'] == "藥局")]
-                    edit_cols = ["月份", "店別", "姓名", "現有特休", "現有補休", "本月加班時數", "換錢時數"] + PHARMACY_VAR + ["備註"]
+                    # 💡 依照帳號類別過濾 (mgr_ 抓藥局，cmgr_ 抓個管師)
+                    mgr_view = mgr_view[(mgr_view['店別'].astype(str).str.zfill(2) == shop) & (mgr_view['單位'] == mgr_type)]
+                    
+                    var_cols = PHARMACY_VAR if mgr_type == "藥局" else CASE_MGR_VAR
+                    edit_cols = ["月份", "店別", "姓名", "現有特休", "現有補休", "本月加班時數", "換錢時數"] + var_cols + ["備註"]
+                    
                     for col in edit_cols:
                         if col not in mgr_view.columns: mgr_view[col] = "" if col in ["月份", "店別", "姓名", "備註"] else 0.0
                         if col not in ["月份", "店別", "姓名", "備註"]: mgr_view[col] = pd.to_numeric(mgr_view[col], errors='coerce').fillna(0.0)
                     
-                    st.subheader("💰 藥局發薪作業 (店長權限)")
+                    st.subheader(f"💰 {mgr_type}發薪作業 ({'店長' if mgr_type=='藥局' else '主管'}權限)")
                     if not mgr_view.empty:
                         ed_mgr = st.data_editor(mgr_view[edit_cols], disabled=["月份", "店別", "姓名", "現有特休", "現有補休"] if not is_locked else edit_cols, key="mp")
-                        if st.button("💾 店長存檔同步") and not is_locked:
+                        if st.button(f"💾 {mgr_type}存檔同步") and not is_locked:
                             for _, row in ed_mgr.iterrows():
                                 mask_p, mask_e = (df_pay['月份'].astype(str) == target_m) & (df_pay['姓名'] == row['姓名']), df_emp['姓名'] == row['姓名']
                                 if any(mask_p) and any(mask_e):
@@ -345,9 +356,9 @@ def main():
                                     df_emp.loc[mask_e, '補休餘額'] = clean_val(df_emp.loc[mask_e, '補休餘額'].values[0]) + (new_add - old_add) - (new_cash - old_cash)
                                     df_pay.loc[mask_p, '本月加班時數'], df_pay.loc[mask_p, '換錢時數'] = new_add, new_cash
                                     df_pay.loc[mask_p, '加班津貼'] = float(round(new_cash * rate))
-                                    for col in PHARMACY_VAR + ['備註']: df_pay.loc[mask_p, col] = row[col]
-                            conn.update(worksheet=PAY_SHEET, data=df_pay); conn.update(worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.success("店長存檔完成")
-                    else: st.info("尚無藥局人員資料。")
+                                    for col in var_cols + ['備註']: df_pay.loc[mask_p, col] = row[col]
+                            conn.update(worksheet=PAY_SHEET, data=df_pay); conn.update(worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.success(f"{mgr_type}存檔完成")
+                    else: st.info(f"尚無{mgr_type}人員資料。")
 
         if role == 1:
             with tabs[1]:
