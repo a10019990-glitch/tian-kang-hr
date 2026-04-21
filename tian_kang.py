@@ -157,11 +157,13 @@ def main():
                     elif acc == "acct": st.session_state.auth, st.session_state.shop, st.session_state.mgr_type = 4, "ACCOUNTING", "ALL"
                     elif acc.startswith("mgr_"): 
                         sid = re.findall(r'\d+', acc)
-                        st.session_state.auth, st.session_state.shop, st.session_state.mgr_type = 3, (sid[0].zfill(2) if sid else "00"), "藥局"
-                    # 💡 判斷是否為「個管師主管」
+                        shop_id = sid[0].zfill(2) if sid else "ALL"
+                        st.session_state.auth, st.session_state.shop, st.session_state.mgr_type = 3, shop_id, "藥局"
                     elif acc.startswith("cmgr_"): 
                         sid = re.findall(r'\d+', acc)
-                        st.session_state.auth, st.session_state.shop, st.session_state.mgr_type = 3, (sid[0].zfill(2) if sid else "00"), "個管師"
+                        # 💡 解鎖：如果帳號是 cmgr_all 或沒有數字，就給他 ALL 總管權限
+                        shop_id = sid[0].zfill(2) if sid else "ALL"
+                        st.session_state.auth, st.session_state.shop, st.session_state.mgr_type = 3, shop_id, "個管師"
                     st.rerun()
         elif mode == "員工查詢":
             e_acc = st.text_input("員工帳號"); e_pw = st.text_input("密碼", type="password")
@@ -172,8 +174,8 @@ def main():
         elif mode == "新帳號註冊":
             st.subheader("📝 註冊員工專區帳號")
             with st.form("reg_form"):
-                new_acc = st.text_input("設定登入帳號 (建議使用英文+數字)")
-                st.caption("※ 藥局店長請以 `mgr_` 開頭；個管師主管請以 `cmgr_` 開頭")
+                new_acc = st.text_input("設定登入帳號")
+                st.caption("※ 藥局單店店長：`mgr_01` \n\n※ 個管師總區主管：`cmgr_all` \n\n※ 一般員工：建議英文+數字")
                 new_pw = st.text_input("設定登入密碼", type="password")
                 confirm_pw = st.text_input("確認密碼", type="password")
                 new_name = st.text_input("真實姓名 (需與發薪表完全一致)")
@@ -333,8 +335,11 @@ def main():
                     mgr_view = mgr_view.merge(df_emp[['姓名'] + [c for c in cols_from_emp if c in df_emp.columns]], on='姓名', how='left')
                     mgr_view.rename(columns={'補休餘額': '現有補休', '剩餘特休時數': '現有特休'}, inplace=True)
                     
-                    # 💡 依照帳號類別過濾 (mgr_ 抓藥局，cmgr_ 抓個管師)
-                    mgr_view = mgr_view[(mgr_view['店別'].astype(str).str.zfill(2) == shop) & (mgr_view['單位'] == mgr_type)]
+                    # 💡 解鎖：如果帳號權限是 ALL，就顯示該單位所有人
+                    if shop == "ALL":
+                        mgr_view = mgr_view[mgr_view['單位'] == mgr_type]
+                    else:
+                        mgr_view = mgr_view[(mgr_view['店別'].astype(str).str.zfill(2) == shop) & (mgr_view['單位'] == mgr_type)]
                     
                     var_cols = PHARMACY_VAR if mgr_type == "藥局" else CASE_MGR_VAR
                     edit_cols = ["月份", "店別", "姓名", "現有特休", "現有補休", "本月加班時數", "換錢時數"] + var_cols + ["備註"]
@@ -343,7 +348,7 @@ def main():
                         if col not in mgr_view.columns: mgr_view[col] = "" if col in ["月份", "店別", "姓名", "備註"] else 0.0
                         if col not in ["月份", "店別", "姓名", "備註"]: mgr_view[col] = pd.to_numeric(mgr_view[col], errors='coerce').fillna(0.0)
                     
-                    st.subheader(f"💰 {mgr_type}發薪作業 ({'店長' if mgr_type=='藥局' else '主管'}權限)")
+                    st.subheader(f"💰 {mgr_type}發薪作業 ({'總管' if shop=='ALL' else '店長'}權限)")
                     if not mgr_view.empty:
                         ed_mgr = st.data_editor(mgr_view[edit_cols], disabled=["月份", "店別", "姓名", "現有特休", "現有補休"] if not is_locked else edit_cols, key="mp")
                         if st.button(f"💾 {mgr_type}存檔同步") and not is_locked:
