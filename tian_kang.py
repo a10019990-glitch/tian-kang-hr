@@ -117,7 +117,16 @@ def send_salary_email(to_email, name, month, details_dict):
 def fetch_all_data():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        std_map = {"月份": "月份", "姓名": "姓名", "身分證": "身分證", "加保日期": "加保日期", "補休餘額": "補休餘額", "剩餘特休時數": "剩餘特休時數", "累計應得特休": "累計應得特休", "加班時薪": "加班時薪", "基本薪資合計": "底薪", "底薪": "底薪", "單位": "單位", "店別": "店別", "生效月份": "生效月份", "執照津貼": "執照津貼", "車資補貼": "車資補貼", "電子郵件": "電子郵件", "收款帳號": "收款帳號"}
+        # 💡 將基礎薪資欄位擴充為 6 大項
+        std_map = {
+            "月份": "月份", "姓名": "姓名", "身分證": "身分證", "加保日期": "加保日期",
+            "補休餘額": "補休餘額", "剩餘特休時數": "剩餘特休時數", "累計應得特休": "累計應得特休",
+            "加班時薪": "加班時薪", "單位": "單位", "店別": "店別", "生效月份": "生效月份",
+            "本薪": "本薪", "三節獎金(評估表現發放)": "三節獎金(評估表現發放)",
+            "保障獎金": "保障獎金", "固定加班津貼": "固定加班津貼",
+            "執照津貼": "執照津貼", "車資補貼": "車資補貼", 
+            "電子郵件": "電子郵件", "收款帳號": "收款帳號"
+        }
         std_cols = list(set(std_map.values()))
         
         df_emp = robust_clean(conn.read(worksheet=EMP_SHEET, ttl=30), std_map, std_cols)
@@ -129,7 +138,10 @@ def fetch_all_data():
         try: df_lock = robust_clean(conn.read(worksheet=LOCK_SHEET, ttl=30), None, ["月份", "狀態"])
         except: df_lock = pd.DataFrame(columns=['月份', '狀態'])
         
-        for col in ['本月加班時數', '換錢時數', '加班津貼', '補休餘額', '剩餘特休時數', '累計應得特休', '底薪', '加班時薪']:
+        # 強制轉為數值型態
+        num_cols = ['本月加班時數', '換錢時數', '加班津貼', '補休餘額', '剩餘特休時數', '累計應得特休', '加班時薪', 
+                    '本薪', '三節獎金(評估表現發放)', '保障獎金', '固定加班津貼', '執照津貼', '車資補貼']
+        for col in num_cols:
             if col in df_pay.columns: df_pay[col] = pd.to_numeric(df_pay[col], errors='coerce').fillna(0.0)
             if col in df_emp.columns: df_emp[col] = pd.to_numeric(df_emp[col], errors='coerce').fillna(0.0)
         return df_emp, df_pay, df_ins, df_acc, df_lv, df_ot, df_lock
@@ -219,10 +231,21 @@ def main():
                 b_cols = PHARMACY_VAR if e_info.get('單位') == "藥局" else CASE_MGR_VAR
                 for c in ALL_VAR_COLS + ['勞健保個人負擔', '本月加班時數', '換錢時數']: p_pay[c] = pd.to_numeric(p_pay[c], errors='coerce').fillna(0)
                 
-                base = clean_val(e_info.get('底薪', 0)); lic = clean_val(e_info.get('執照津貼', 0)); trans = clean_val(e_info.get('車資補貼', 0))
-                p_pay['底薪'] = base; p_pay['執照津貼'] = lic; p_pay['車資補貼'] = trans
-                p_pay['實領總額'] = (base + lic + trans + p_pay[b_cols].sum(axis=1) + p_pay['加班津貼']) - p_pay['勞健保個人負擔']
-                st.dataframe(p_pay[['月份', '底薪', '加班津貼', '執照津貼', '車資補貼'] + b_cols + ['本月加班時數', '換錢時數', '勞健保個人負擔', '實領總額', '備註']], use_container_width=True)
+                # 💡 員工介面精準提取 6 大基礎薪資
+                p_pay['本薪'] = clean_val(e_info.get('本薪', 0))
+                p_pay['三節獎金(評估表現發放)'] = clean_val(e_info.get('三節獎金(評估表現發放)', 0))
+                p_pay['保障獎金'] = clean_val(e_info.get('保障獎金', 0))
+                p_pay['固定加班津貼'] = clean_val(e_info.get('固定加班津貼', 0))
+                p_pay['執照津貼'] = clean_val(e_info.get('執照津貼', 0))
+                p_pay['車資補貼'] = clean_val(e_info.get('車資補貼', 0))
+                
+                # 自動精算總和
+                p_pay['實領總額'] = (p_pay['本薪'] + p_pay['三節獎金(評估表現發放)'] + p_pay['保障獎金'] + p_pay['固定加班津貼'] + p_pay['執照津貼'] + p_pay['車資補貼'] + p_pay[b_cols].sum(axis=1) + p_pay['加班津貼']) - p_pay['勞健保個人負擔']
+                
+                # 顯示時將「加班津貼」正名為「加班費」
+                display_df = p_pay[['月份', '本薪', '三節獎金(評估表現發放)', '保障獎金', '固定加班津貼', '執照津貼', '車資補貼', '加班津貼'] + b_cols + ['本月加班時數', '換錢時數', '勞健保個人負擔', '實領總額', '備註']].copy()
+                display_df = display_df.rename(columns={'加班津貼': '加班費'})
+                st.dataframe(display_df, use_container_width=True)
         with t2:
             ebal = df_emp[df_emp['姓名']==name].iloc[0] if not df_emp[df_emp['姓名']==name].empty else {}
             c1, c2 = st.columns(2)
@@ -268,7 +291,7 @@ def main():
                 curr = df_pay[df_pay['月份'].astype(str) == target_m].copy()
                 
                 if role == 1: # --- 老闆視角 ---
-                    cols_from_emp = ['單位','底薪','執照津貼','車資補貼','電子郵件','加班時薪', '補休餘額', '剩餘特休時數', '店別']
+                    cols_from_emp = ['單位', '本薪', '三節獎金(評估表現發放)', '保障獎金', '固定加班津貼', '執照津貼', '車資補貼', '電子郵件', '加班時薪', '補休餘額', '剩餘特休時數', '店別']
                     curr = curr.drop(columns=[c for c in curr.columns if c in cols_from_emp], errors='ignore')
                     curr = curr.merge(df_emp[['姓名'] + [c for c in cols_from_emp if c in df_emp.columns]], on='姓名', how='left')
                     curr.rename(columns={'補休餘額': '現有補休', '剩餘特休時數': '現有特休'}, inplace=True)
@@ -279,16 +302,22 @@ def main():
                         l_ins_list.append(v.sort_values('生效月份', ascending=False).iloc[0].reindex(['姓名','勞健保個人負擔'], fill_value=0) if not v.empty else pd.Series([n,0], index=['姓名','勞健保個人負擔']))
                     curr = curr.merge(pd.DataFrame(l_ins_list), on='姓名', how='left')
                     
-                    calc_cols = ALL_VAR_COLS + ['底薪', '勞健保個人負擔', '本月加班時數', '換錢時數', '現有補休', '現有特休', '執照津貼', '車資補貼']
+                    calc_cols = ALL_VAR_COLS + ['本薪', '三節獎金(評估表現發放)', '保障獎金', '固定加班津貼', '勞健保個人負擔', '本月加班時數', '換錢時數', '現有補休', '現有特休', '執照津貼', '車資補貼']
                     for c in calc_cols: 
                         if c not in curr.columns: curr[c] = 0.0
                         curr[c] = pd.to_numeric(curr[c], errors='coerce').fillna(0.0)
-                    curr['應付金額'] = (curr['底薪'] + curr['執照津貼'] + curr['車資補貼'] + curr[ALL_VAR_COLS].sum(axis=1)) - curr['勞健保個人負擔']
+                    
+                    curr['應付金額'] = (curr['本薪'] + curr['三節獎金(評估表現發放)'] + curr['保障獎金'] + curr['固定加班津貼'] + curr['執照津貼'] + curr['車資補貼'] + curr[ALL_VAR_COLS].sum(axis=1)) - curr['勞健保個人負擔']
+                    
+                    # 將欄位名稱在顯示時正名為「加班費」
+                    curr = curr.rename(columns={'加班津貼': '加班費'})
                     
                     st.subheader("💊 藥局組")
-                    ed_p = st.data_editor(curr[curr['單位'] == "藥局"][['月份','店別','姓名','現有特休','現有補休','本月加班時數','換錢時數','底薪','加班津貼','勞健保個人負擔','應付金額','電子郵件'] + PHARMACY_VAR + ['備註']], disabled=["現有特休", "現有補休", "勞健保個人負擔", "加班津貼"] if not is_locked else True, key="bp")
+                    base_show_cols = ['月份','店別','姓名','現有特休','現有補休','本月加班時數','換錢時數', '本薪', '三節獎金(評估表現發放)', '保障獎金', '固定加班津貼', '執照津貼', '車資補貼', '加班費', '勞健保個人負擔', '應付金額', '電子郵件']
+                    ed_p = st.data_editor(curr[curr['單位'] == "藥局"][base_show_cols + PHARMACY_VAR + ['備註']], disabled=["現有特休", "現有補休", "勞健保個人負擔", "加班費"] if not is_locked else True, key="bp")
+                    
                     st.subheader("📂 個管師組")
-                    ed_c = st.data_editor(curr[curr['單位'] == "個管師"][['月份','店別','姓名','現有特休','現有補休','本月加班時數','換錢時數','底薪','加班津貼','勞健保個人負擔','應付金額','電子郵件'] + CASE_MGR_VAR + ['備註']], disabled=["現有特休", "現有補休", "勞健保個人負擔", "加班津貼"] if not is_locked else True, key="bc")
+                    ed_c = st.data_editor(curr[curr['單位'] == "個管師"][base_show_cols + CASE_MGR_VAR + ['備註']], disabled=["現有特休", "現有補休", "勞健保個人負擔", "加班費"] if not is_locked else True, key="bc")
                     
                     if st.button("💾 老闆同步存檔") and not is_locked:
                         for _, r in pd.concat([ed_p, ed_c]).iterrows():
@@ -299,7 +328,7 @@ def main():
                                 new_add, new_cash = clean_val(r.get('本月加班時數', 0)), clean_val(r.get('換錢時數', 0))
                                 df_emp.loc[mask_e, '補休餘額'] = clean_val(df_emp.loc[mask_e, '補休餘額'].values[0]) + (new_add - old_add) - (new_cash - old_cash)
                                 df_pay.loc[mask_p, '本月加班時數'], df_pay.loc[mask_p, '換錢時數'] = new_add, new_cash
-                                df_pay.loc[mask_p, '加班津貼'] = float(round(new_cash * rate))
+                                df_pay.loc[mask_p, '加班津貼'] = float(round(new_cash * rate))  # 寫回資料庫維持「加班津貼」名稱
                                 for col in ALL_VAR_COLS + ['備註']: 
                                     if col != '加班津貼' and col in r: df_pay.loc[mask_p, col] = r[col]
                         conn.update(worksheet=PAY_SHEET, data=df_pay); conn.update(worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.success("完成")
@@ -312,8 +341,16 @@ def main():
                             count = 0
                             for _, r in ed_p.iterrows():
                                 if not pd.isna(r.get('電子郵件')) and str(r.get('電子郵件')).strip() != "":
-                                    # 💡 Email 排版：「加班津貼」已改為「加班費」
-                                    d = {"底薪": r.get('底薪', 0), "加班費": r.get('加班津貼', 0), "執照津貼": r.get('執照津貼', 0), "車資補貼": r.get('車資補貼', 0)}
+                                    # 💡 Email 排版：顯示拆分後的項目與「加班費」
+                                    d = {
+                                        "本薪": r.get('本薪', 0),
+                                        "三節獎金(評估表現發放)": r.get('三節獎金(評估表現發放)', 0),
+                                        "保障獎金": r.get('保障獎金', 0),
+                                        "固定加班津貼": r.get('固定加班津貼', 0),
+                                        "執照津貼": r.get('執照津貼', 0),
+                                        "車資補貼": r.get('車資補貼', 0),
+                                        "加班費": r.get('加班費', 0)
+                                    }
                                     for b in PHARMACY_VAR: d[b] = r.get(b, 0)
                                     d.update({"本月加班時數": r.get('本月加班時數', 0), "換錢時數": r.get('換錢時數', 0), "勞健保扣款": r.get('勞健保個人負擔', 0), "實領總額": r.get('應付金額', 0), "備註說明": r.get('備註', '')})
                                     if send_salary_email(r['電子郵件'], r['姓名'], target_m, d): count += 1
@@ -323,8 +360,15 @@ def main():
                             count = 0
                             for _, r in ed_c.iterrows():
                                 if not pd.isna(r.get('電子郵件')) and str(r.get('電子郵件')).strip() != "":
-                                    # 💡 Email 排版：「加班津貼」已改為「加班費」
-                                    d = {"底薪": r.get('底薪', 0), "加班費": r.get('加班津貼', 0), "執照津貼": r.get('執照津貼', 0), "車資補貼": r.get('車資補貼', 0)}
+                                    d = {
+                                        "本薪": r.get('本薪', 0),
+                                        "三節獎金(評估表現發放)": r.get('三節獎金(評估表現發放)', 0),
+                                        "保障獎金": r.get('保障獎金', 0),
+                                        "固定加班津貼": r.get('固定加班津貼', 0),
+                                        "執照津貼": r.get('執照津貼', 0),
+                                        "車資補貼": r.get('車資補貼', 0),
+                                        "加班費": r.get('加班費', 0)
+                                    }
                                     for b in CASE_MGR_VAR: d[b] = r.get(b, 0)
                                     d.update({"本月加班時數": r.get('本月加班時數', 0), "換錢時數": r.get('換錢時數', 0), "勞健保扣款": r.get('勞健保個人負擔', 0), "實領總額": r.get('應付金額', 0), "備註說明": r.get('備註', '')})
                                     if send_salary_email(r['電子郵件'], r['姓名'], target_m, d): count += 1
