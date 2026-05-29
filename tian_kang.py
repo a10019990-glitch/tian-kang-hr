@@ -14,10 +14,9 @@ PAY_SHEET, EMP_SHEET, INS_SHEET = "salary_data", "emp_info", "ins_info"
 ACC_SHEET, LOCK_SHEET = "user_accounts", "lock_status"
 LEAVE_SHEET, OT_SHEET = "leave_requests", "ot_requests"
 
-# 💡 UI 升級：隱藏側邊欄，讓登入畫面完全置中
-st.set_page_config(page_title="天康藥局管理系統", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="天康藥局管理系統", layout="wide")
 
-# 💡 注入您設計的 CSS 元素 (字體、陰影、隱藏預設選單)
+# 💡 UI 升級：優化 CSS 選擇器，保留側邊欄箭頭按鈕，僅隱藏部署等無關工具列
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -26,11 +25,11 @@ st.markdown("""
         font-family: 'Inter', sans-serif;
     }
     
-    #MainMenu {visibility: hidden;}
-    header {visibility: hidden;}
+    /* 僅隱藏右側工具列與部署按鈕，保留左側邊欄切換按鈕 */
+    div[data-testid="stToolbar"] {visibility: hidden;}
+    .stDeployButton {display:none;}
     footer {visibility: hidden;}
     
-    /* 模仿 Tailwind 的卡片圓角與陰影 */
     div[data-testid="stForm"] {
         border-radius: 12px;
         border: 1px solid #e0e3e5;
@@ -39,7 +38,6 @@ st.markdown("""
         padding: 2rem;
     }
     
-    /* 置中 Radio Button (系統入口切換) */
     div.row-widget.stRadio > div {
         display: flex;
         justify-content: center;
@@ -158,16 +156,13 @@ def fetch_all_data():
             "保障獎金": "保障獎金", "固定加班津貼": "固定加班津貼",
             "執照津貼": "執照津貼", "車資補貼": "車資補貼", 
             "電子郵件": "電子郵件", "收款帳號": "收款帳號",
-            "勞工自提勞退": "勞工自提勞退" # 💡 新增映射
+            "勞工自提勞退": "勞工自提勞退"
         }
         std_cols = list(set(std_map.values()))
         
         df_emp = robust_clean(conn.read(worksheet=EMP_SHEET, ttl=30), std_map, std_cols)
         df_pay = robust_clean(conn.read(worksheet=PAY_SHEET, ttl=30), std_map, std_cols + ['本月加班時數', '換補休時數', '換特休時數', '加班費', '特休折現'] + ALL_VAR_COLS)
-        
-        # 💡 將「勞工自提勞退」加入勞健保表 (INS_SHEET) 進行管理
         df_ins = robust_clean(conn.read(worksheet=INS_SHEET, ttl=30), std_map, std_cols + ['勞健保個人負擔', '勞工自提勞退'])
-        
         df_acc = robust_clean(conn.read(worksheet=ACC_SHEET, ttl=30), None, ["帳號", "密碼", "姓名", "身分證"])
         df_lv = robust_clean(conn.read(worksheet=LEAVE_SHEET, ttl=30), None, ["日期", "姓名", "類別", "時數", "狀態"])
         df_ot = robust_clean(conn.read(worksheet=OT_SHEET, ttl=30), None, ["日期", "姓名", "時數", "處理方式", "狀態"])
@@ -256,12 +251,14 @@ def main():
             st.markdown("<p style='text-align: center; color: #c4c6cd; font-size: 12px; margin-top: 2rem;'>Secure connection • Internal Use Only</p>", unsafe_allow_html=True)
         return
 
-    # --- 登入後的頂部控制列 ---
-    head_col1, head_col2 = st.columns([8, 1])
+    # 💡 UI 升級：融合頂部控制列，免進側邊欄，同步與登出一目了然
+    head_col1, head_col2, head_col3 = st.columns([6, 1.5, 1.5])
     with head_col1:
-        st.markdown("<h2 style='color: #162839; margin-top:0;'>🏥 天康藥局管理系統</h2>", unsafe_allow_html=True)
+        st.markdown("<h2 style='color: #162839; margin-top:0; font-weight:700;'>🏥 天康藥局管理系統</h2>", unsafe_allow_html=True)
     with head_col2:
-        if st.button("登出系統", use_container_width=True): del st.session_state['auth']; st.rerun()
+        if st.button("🔄 同步雲端資料", use_container_width=True): st.cache_data.clear(); st.rerun()
+    with head_col3:
+        if st.button("🚪 登出系統", use_container_width=True): del st.session_state['auth']; st.rerun()
 
     role, shop = st.session_state.auth, st.session_state.shop
 
@@ -298,10 +295,12 @@ def main():
             p_pay = df_pay[df_pay['姓名'] == name].copy()
             e_info = df_emp[df_emp['姓名'] == name].iloc[0] if not df_emp[df_emp['姓名'] == name].empty else pd.Series()
             if not p_pay.empty and not e_info.empty:
+                # 💡 關鍵修復：先剔除舊欄位防止合併後欄位名重疊（引發二維 DataFrame 拋錯）
+                p_pay = p_pay.drop(columns=['勞健保個人負擔', '勞工自提勞退'], errors='ignore')
+                
                 ins_list = []
                 for m in p_pay['月份'].astype(str):
                     v_ins = df_ins[(df_ins['姓名'] == name) & (df_ins['生效月份'].astype(str) <= m)] if '生效月份' in df_ins.columns else pd.DataFrame()
-                    # 💡 員工介面一併抓取「勞工自提勞退」
                     ins_list.append(v_ins.sort_values('生效月份', ascending=False).iloc[0].reindex(['勞健保個人負擔', '勞工自提勞退'], fill_value=0) if not v_ins.empty else pd.Series([0, 0], index=['勞健保個人負擔', '勞工自提勞退']))
                 p_pay = pd.concat([p_pay.reset_index(drop=True), pd.DataFrame(ins_list).reset_index(drop=True)], axis=1)
                 b_cols = PHARMACY_VAR if e_info.get('單位') == "藥局" else CASE_MGR_VAR
@@ -314,7 +313,6 @@ def main():
                 p_pay['執照津貼'] = clean_val(e_info.get('執照津貼', 0))
                 p_pay['車資補貼'] = clean_val(e_info.get('車資補貼', 0))
                 
-                # 💡 實領總額扣除勞退
                 p_pay['實領總額'] = (p_pay['本薪'] + p_pay['績效獎金(評估表現發放)'] + p_pay['保障獎金'] + p_pay['固定加班津貼'] + p_pay['執照津貼'] + p_pay['車資補貼'] + p_pay[b_cols].sum(axis=1) + p_pay['加班費'] + p_pay['特休折現']) - p_pay['勞健保個人負擔'] - p_pay['勞工自提勞退']
                 
                 display_df = p_pay[['月份', '本薪', '績效獎金(評估表現發放)', '保障獎金', '固定加班津貼', '執照津貼', '車資補貼', '加班費', '特休折現'] + b_cols + ['本月加班時數', '換補休時數', '換特休時數', '勞健保個人負擔', '勞工自提勞退', '實領總額', '備註']].copy()
@@ -340,7 +338,7 @@ def main():
 
     else: # --- 管理端 ---
         if role == 3: t_titles = ["💰 薪資發薪作業"]
-        elif role == 4: t_titles = ["🏥 勞健保與勞退維護"] # 💡 標題修正
+        elif role == 4: t_titles = ["🏥 勞健保與勞退維護"]
         else: t_titles = ["💰 薪資發薪作業", "📑 申請單審核中心", "👤 員工主資料維護", "🏥 勞健保與勞退維護", "🔑 帳號與權限管理"]
         tabs = st.tabs(t_titles)
 
@@ -372,10 +370,11 @@ def main():
                     curr = curr.merge(df_emp[['姓名'] + [c for c in cols_from_emp if c in df_emp.columns]], on='姓名', how='left')
                     curr.rename(columns={'補休餘額': '現有補休', '剩餘特休時數': '現有特休'}, inplace=True)
                     
+                    # 💡 老闆端同步修復：先剔除舊的保險欄位防止 merge 出生兩組同名欄位
+                    curr = curr.drop(columns=['勞健保個人負擔', '勞工自提勞退'], errors='ignore')
                     l_ins_list = []
                     for n in curr['姓名']:
                         v = df_ins[(df_ins['姓名'] == n) & (df_ins['生效月份'].astype(str) <= target_m)] if '生效月份' in df_ins.columns else pd.DataFrame()
-                        # 💡 提取勞工自提勞退
                         l_ins_list.append(v.sort_values('生效月份', ascending=False).iloc[0].reindex(['姓名','勞健保個人負擔', '勞工自提勞退'], fill_value=0) if not v.empty else pd.Series([n, 0, 0], index=['姓名','勞健保個人負擔', '勞工自提勞退']))
                     curr = curr.merge(pd.DataFrame(l_ins_list), on='姓名', how='left')
                     
@@ -384,11 +383,9 @@ def main():
                         if c not in curr.columns: curr[c] = 0.0
                         curr[c] = pd.to_numeric(curr[c], errors='coerce').fillna(0.0)
                     
-                    # 💡 實領金額扣除勞退
                     curr['應付金額'] = (curr['本薪'] + curr['績效獎金(評估表現發放)'] + curr['保障獎金'] + curr['固定加班津貼'] + curr['執照津貼'] + curr['車資補貼'] + curr[ALL_VAR_COLS].sum(axis=1)) - curr['勞健保個人負擔'] - curr['勞工自提勞退']
                     
                     st.markdown("<h4 style='color: #162839; margin-top:16px;'>💊 藥局組</h4>", unsafe_allow_html=True)
-                    # 💡 在表格顯示勞工自提勞退 (唯讀)
                     base_show_cols = ['月份','店別','姓名','現有特休','現有補休','本月加班時數','換補休時數','換特休時數', '本薪', '績效獎金(評估表現發放)', '保障獎金', '固定加班津貼', '執照津貼', '車資補貼', '加班費', '特休折現', '勞健保個人負擔', '勞工自提勞退', '應付金額', '電子郵件']
                     ed_p = st.data_editor(curr[curr['單位'] == "藥局"][base_show_cols + PHARMACY_VAR + ['備註']], disabled=["現有特休", "現有補休", "勞健保個人負擔", "勞工自提勞退", "加班費", "特休折現"] if not is_locked else True, key="bp", use_container_width=True)
                     
@@ -434,7 +431,6 @@ def main():
                                 if not pd.isna(r.get('電子郵件')) and str(r.get('電子郵件')).strip() != "":
                                     d = {"本薪": r.get('本薪', 0), "績效獎金(評估表現發放)": r.get('績效獎金(評估表現發放)', 0), "保障獎金": r.get('保障獎金', 0), "固定加班津貼": r.get('固定加班津貼', 0), "執照津貼": r.get('執照津貼', 0), "車資補貼": r.get('車資補貼', 0), "加班費": r.get('加班費', 0), "特休折現": r.get('特休折現', 0)}
                                     for b in PHARMACY_VAR: d[b] = r.get(b, 0)
-                                    # 💡 加入 Email 的勞退明細
                                     d.update({"本月加班時數": r.get('本月加班時數', 0), "換補休時數": r.get('換補休時數', 0), "換特休時數": r.get('換特休時數', 0), "勞健保扣款": r.get('勞健保個人負擔', 0), "勞退自提扣款": r.get('勞工自提勞退', 0), "實領總額": r.get('應付金額', 0), "備註說明": r.get('備註', '')})
                                     if send_salary_email(r['電子郵件'], r['姓名'], target_m, d): count += 1
                             st.success(f"✅ 已成功發送 {count} 封【藥局】薪資明細郵件！")
@@ -445,12 +441,11 @@ def main():
                                 if not pd.isna(r.get('電子郵件')) and str(r.get('電子郵件')).strip() != "":
                                     d = {"本薪": r.get('本薪', 0), "績效獎金(評估表現發放)": r.get('績效獎金(評估表現發放)', 0), "保障獎金": r.get('保障獎金', 0), "固定加班津貼": r.get('固定加班津貼', 0), "執照津貼": r.get('執照津貼', 0), "車資補貼": r.get('車資補貼', 0), "加班費": r.get('加班費', 0), "特休折現": r.get('特休折現', 0)}
                                     for b in CASE_MGR_VAR: d[b] = r.get(b, 0)
-                                    # 💡 加入 Email 的勞退明細
                                     d.update({"本月加班時數": r.get('本月加班時數', 0), "換補休時數": r.get('換補休時數', 0), "換特休時數": r.get('換特休時數', 0), "勞健保扣款": r.get('勞健保個人負擔', 0), "勞退自提扣款": r.get('勞工自提勞退', 0), "實領總額": r.get('應付金額', 0), "備註說明": r.get('備註', '')})
                                     if send_salary_email(r['電子郵件'], r['姓名'], target_m, d): count += 1
                             st.success(f"✅ 已成功發送 {count} 封【個管師】薪資明細郵件！")
 
-                elif role == 3: # --- 💡 主管雙軌視角 ---
+                elif role == 3: # --- 主管雙軌視角 ---
                     mgr_type = st.session_state.mgr_type
                     cols_from_emp = ['單位', '店別', '補休餘額', '剩餘特休時數', '加班時薪', '特休時薪']
                     mgr_view = curr.copy()
@@ -548,7 +543,6 @@ def main():
 
             with tabs[3]:
                 st.markdown("<h4 style='color: #162839;'>🏥 勞健保與勞退紀錄維護</h4>", unsafe_allow_html=True)
-                # 💡 老闆可以在這裡同時維護「勞健保」與「勞退」扣款金額
                 ed_ins_boss = st.data_editor(df_ins, num_rows="dynamic", key="b_ins", use_container_width=True)
                 if st.button("💾 儲存勞健保更新", use_container_width=True):
                     conn.update(worksheet=INS_SHEET, data=ed_ins_boss); st.cache_data.clear(); st.success("✅ 勞健保與勞退資料已更新！")
