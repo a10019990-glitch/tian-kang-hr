@@ -67,7 +67,7 @@ def robust_clean(df, mapping_dict=None, expected_cols=None):
     if expected_cols:
         for c in expected_cols:
             if c not in df.columns: df[c] = 0.0 if "時數" in c or "津貼" in c else ""
-    return df.loc[:, ~df.columns.duplicated()]
+    return df.loc[:, ~df.columns.duplicated()].copy()
 
 def get_annual_leave_hours(start_date_str):
     if not start_date_str or pd.isna(start_date_str) or str(start_date_str).strip() == "": return 0.0
@@ -137,7 +137,7 @@ def fetch_all_data():
             "月份": "月份", "姓名": "姓名", "身分證": "身分證", "加保日期": "加保日期",
             "補休餘額": "補休餘額", "剩餘特休時數": "剩餘特休時數", "累計應得特休": "累計應得特休",
             "加班時薪": "加班時薪", "特休時薪": "特休時薪", "單位": "單位", "店別": "店別", "生效月份": "生效月份",
-            "本薪": "本薪", "績效獎金(評估表現發放)": "績效獎金(評估表現發放)", 
+            "本薪": "本薪", "三節獎金(評估表現發放)": "績效獎金(評估表現發放)", 
             "保障獎金": "保障獎金", "固定加班津貼": "固定加班津貼",
             "執照津貼": "執照津貼", "車資補貼": "車資補貼", 
             "電子郵件": "電子郵件", "收款帳號": "收款帳號",
@@ -154,6 +154,12 @@ def fetch_all_data():
         try: df_lock = robust_clean(conn.read(worksheet=LOCK_SHEET, ttl=30), None, ["月份", "狀態"])
         except: df_lock = pd.DataFrame(columns=['月份', '狀態'])
         
+        # 💡 關鍵修復：強制將資料庫讀出的月份統一清洗為 YYYY-MM 純字串，防止時間格式不連動
+        if '月份' in df_pay.columns:
+            df_pay['月份'] = df_pay['月份'].astype(str).str.strip().str.extract(r'^(\d{4}-\d{2})')[0].fillna(df_pay['月份'].astype(str))
+        if '月份' in df_lock.columns:
+            df_lock['月份'] = df_lock['月份'].astype(str).str.strip().str.extract(r'^(\d{4}-\d{2})')[0].fillna(df_lock['月份'].astype(str))
+        
         num_cols = ['本月加班時數', '換補休時數', '換特休時數', '加班費', '特休折現', '補休餘額', '剩餘特休時數', '累計應得特休', '加班時薪', '特休時薪', 
                     '本薪', '績效獎金(評估表現發放)', '保障獎金', '固定加班津貼', '執照津貼', '車資補貼', '勞健保個人負擔', '勞工自提勞退']
         for col in num_cols:
@@ -169,6 +175,11 @@ def main():
     try:
         df_emp, df_pay, df_ins, df_acc, df_lv, df_ot, df_lock = fetch_all_data()
         conn = st.connection("gsheets", type=GSheetsConnection)
+        
+        # 💡 鐵甲防護盾：在進入主程式前，強制對所有快取 DataFrame 進行欄位去重與實體化，防堵 TypeError
+        df_pay = df_pay.loc[:, ~df_pay.columns.duplicated()].copy()
+        df_emp = df_emp.loc[:, ~df_emp.columns.duplicated()].copy()
+        df_ins = df_ins.loc[:, ~df_ins.columns.duplicated()].copy()
     except Exception as e:
         st.error("🚨 系統連線暫時受到限制。請稍候再試。"); st.stop()
 
@@ -229,7 +240,7 @@ def main():
                             st.cache_data.clear(); st.success("✅ 註冊成功！請切換入口登入。")
         return
 
-    # 💡 頂部主控制列：同步與登出放最醒目的地方
+    # 頂部主控制列
     head_col1, head_col2, head_col3 = st.columns([6, 1.5, 1.5])
     with head_col1:
         st.markdown("<h2 style='color: #162839; margin-top:0; font-weight:700;'>🏥 天康藥局管理系統</h2>", unsafe_allow_html=True)
@@ -273,12 +284,10 @@ def main():
             p_pay = df_pay[df_pay['姓名'] == name].copy()
             e_info = df_emp[df_emp['姓名'] == name].iloc[0] if not df_emp[df_emp['姓名'] == name].empty else pd.Series()
             if not p_pay.empty and not e_info.empty:
-                # 💡 歷史快照機制：如果發薪表內本來就有存保費與勞退金額（大於0），直接採用歷史數值，不進行覆蓋
                 for col in ['勞健保個人負擔', '勞工自提勞退']:
                     if col not in p_pay.columns: p_pay[col] = 0.0
                     p_pay[col] = pd.to_numeric(p_pay[col], errors='coerce').fillna(0.0)
                 
-                # 對於沒有歷史數值的行（如剛建立的月份），才執行落後動態補值
                 for idx, r in p_pay.iterrows():
                     m = r['月份']
                     if r['勞健保個人負擔'] == 0 and r['勞工自提勞退'] == 0:
@@ -329,13 +338,14 @@ def main():
 
         if "💰 薪資發薪作業" in t_titles:
             with tabs[0]:
-                all_m = sorted([str(m) for m in df_pay['月份'].dropna().unique()], reverse=True) if '月份' in df_pay.columns else ["無"]
+                all_m = sorted([str(m).strip() for m in df_pay['月份'].dropna().unique() if str(m).strip() != ""], reverse=True)
+                if not all_m: all_m = ["無"]
                 
-                # 💡 UI 升級：將「月份選擇」與「月份管理」徹底解放至主畫面上方
+                # 💡 月份控制面板（解放至主畫面最上方）
                 m_panel_col1, m_panel_col2 = st.columns([1, 1])
                 with m_panel_col1:
                     target_m = st.selectbox("📅 切換薪資明細月份", all_m, key="m_box")
-                    is_locked = any(df_lock[df_lock['月份'].astype(str) == target_m]['狀態'] == "LOCKED") if not df_lock.empty else False
+                    is_locked = any(df_lock[df_lock['月份'].astype(str) == str(target_m)]['狀態'] == "LOCKED") if not df_lock.empty else False
                 
                 if role == 1:
                     with m_panel_col2:
@@ -350,14 +360,24 @@ def main():
                                     conn.update(worksheet=PAY_SHEET, data=pd.concat([df_pay, new_r], ignore_index=True)); st.cache_data.clear(); st.rerun()
                             with c_btn2:
                                 if st.button("🔒 變更本月鎖定狀態", use_container_width=True):
-                                    conn.update(worksheet=LOCK_SHEET, data=pd.concat([df_lock[df_lock['月份'].astype(str) != target_m], pd.DataFrame({"月份":[target_m],"狀態":["OPEN" if is_locked else "LOCKED"]})], ignore_index=True)); st.cache_data.clear(); st.rerun()
+                                    conn.update(worksheet=LOCK_SHEET, data=pd.concat([df_lock[df_lock['月份'].astype(str) != str(target_m)], pd.DataFrame({"月份":[str(target_m)],"狀態":["OPEN" if is_locked else "LOCKED"]})], ignore_index=True)); st.cache_data.clear(); st.rerun()
                             
                             st.markdown("<hr style='margin: 8px 0; border-color: #eee;'>", unsafe_allow_html=True)
+                            st.markdown("<p style='color: #ba1a1a; font-weight: 600; margin-bottom:0;'>🔥 危險操作區域</p>", unsafe_allow_html=True)
                             del_m = st.selectbox("選擇要刪除的月份", all_m, key="del_box")
-                            if st.button("🔥 確定刪除該月份資料", use_container_width=True) and st.checkbox("我已確認後果，同意刪除"):
-                                conn.update(worksheet=PAY_SHEET, data=df_pay[df_pay['月份'].astype(str) != del_m]); st.cache_data.clear(); st.rerun()
+                            
+                            # 💡 關鍵修復：將確認方塊放在按鈕上方，阻止 Streamlit 生命週期將按鈕狀態洗掉
+                            confirm_delete = st.checkbox("我已確認後果，同意永久刪除此月份所有同仁發薪資料", key="chk_del")
+                            if st.button("🔥 確定執行刪除", use_container_width=True):
+                                if confirm_delete:
+                                    conn.update(worksheet=PAY_SHEET, data=df_pay[df_pay['月份'].astype(str) != del_m])
+                                    st.cache_data.clear()
+                                    st.success(f"✅ 已成功刪除 {del_m} 月份的所有發薪資料！")
+                                    st.rerun()
+                                else:
+                                    st.error("❌ 刪除失敗：請先勾選上方的「同意永久刪除」確認方塊！")
 
-                curr = df_pay[df_pay['月份'].astype(str) == target_m].copy()
+                curr = df_pay[df_pay['月份'].astype(str) == str(target_m)].copy()
                 
                 if role == 1: # --- 老闆視角 ---
                     cols_from_emp = ['單位', '本薪', '績效獎金(評估表現發放)', '保障獎金', '固定加班津貼', '執照津貼', '車資補貼', '電子郵件', '加班時薪', '特休時薪', '補休餘額', '剩餘特休時數', '店別']
@@ -365,16 +385,15 @@ def main():
                     curr = curr.merge(df_emp[['姓名'] + [c for c in cols_from_emp if c in df_emp.columns]], on='姓名', how='left')
                     curr.rename(columns={'補休餘額': '現有補休', '剩餘特休時數': '現有特休'}, inplace=True)
                     
-                    # 💡 核心修復：確保 curr 中既有欄位數值型態正確
                     for col in ['勞健保個人負擔', '勞工自提勞退']:
                         if col not in curr.columns: curr[col] = 0.0
                         curr[col] = pd.to_numeric(curr[col], errors='coerce').fillna(0.0)
                     
-                    # 💡 快照優先判定：如果歷史發薪表內已經有大於 0 的紀錄，就不去撈取 ins_info 的最新級距
+                    # 歷史快照防覆蓋邏輯
                     for idx, r in curr.iterrows():
                         if r['勞健保個人負擔'] == 0 and r['勞工自提勞退'] == 0:
                             n = r['姓名']
-                            v = df_ins[(df_ins['姓名'] == n) & (df_ins['生效月份'].astype(str) <= target_m)] if '生效月份' in df_ins.columns else pd.DataFrame()
+                            v = df_ins[(df_ins['姓名'] == n) & (df_ins['生效月份'].astype(str) <= str(target_m))] if '生效月份' in df_ins.columns else pd.DataFrame()
                             if not v.empty:
                                 latest_ins = v.sort_values('生效月份', ascending=False).iloc[0]
                                 curr.at[idx, '勞健保個人負擔'] = clean_val(latest_ins.get('勞健保個人負擔', 0))
@@ -396,29 +415,20 @@ def main():
                     
                     if st.button("💾 儲存並同步發薪資料", use_container_width=True) and not is_locked:
                         for _, r in pd.concat([ed_p, ed_c]).iterrows():
-                            mask_p, mask_e = (df_pay['月份'].astype(str) == target_m) & (df_pay['姓名'] == r['姓名']), df_emp['姓名'] == r['姓名']
+                            mask_p, mask_e = (df_pay['月份'].astype(str) == str(target_m)) & (df_pay['姓名'] == r['姓名']), df_emp['姓名'] == r['姓名']
                             if any(mask_p) and any(mask_e):
                                 rate_comp = clean_val(df_emp.loc[mask_e, '加班時薪'].values[0])
                                 rate_al = clean_val(df_emp.loc[mask_e, '特休時薪'].values[0])
-                                
-                                old_add = clean_val(df_pay.loc[mask_p, '本月加班時數'].values[0])
-                                old_comp_cash = clean_val(df_pay.loc[mask_p, '換補休時數'].values[0])
-                                old_al_cash = clean_val(df_pay.loc[mask_p, '換特休時數'].values[0])
-                                
-                                new_add = clean_val(r.get('本月加班時數', 0))
-                                new_comp_cash = clean_val(r.get('換補休時數', 0))
-                                new_al_cash = clean_val(r.get('換特休時數', 0))
+                                old_add, old_comp_cash, old_al_cash = clean_val(df_pay.loc[mask_p, '本月加班時數'].values[0]), clean_val(df_pay.loc[mask_p, '換補休時數'].values[0]), clean_val(df_pay.loc[mask_p, '換特休時數'].values[0])
+                                new_add, new_comp_cash, new_al_cash = clean_val(r.get('本月加班時數', 0)), clean_val(r.get('換補休時數', 0)), clean_val(r.get('換特休時數', 0))
                                 
                                 df_emp.loc[mask_e, '補休餘額'] = clean_val(df_emp.loc[mask_e, '補休餘額'].values[0]) + (new_add - old_add) - (new_comp_cash - old_comp_cash)
                                 df_emp.loc[mask_e, '剩餘特休時數'] = clean_val(df_emp.loc[mask_e, '剩餘特休時數'].values[0]) - (new_al_cash - old_al_cash)
                                 
-                                df_pay.loc[mask_p, '本月加班時數'] = new_add
-                                df_pay.loc[mask_p, '換補休時數'] = new_comp_cash
-                                df_pay.loc[mask_p, '換特休時數'] = new_al_cash
+                                df_pay.loc[mask_p, '本月加班時數'], df_pay.loc[mask_p, '換補休時數'], df_pay.loc[mask_p, '換特休時數'] = new_add, new_comp_cash, new_al_cash
                                 df_pay.loc[mask_p, '加班費'] = float(round(new_comp_cash * rate_comp)) 
                                 df_pay.loc[mask_p, '特休折現'] = float(round(new_al_cash * rate_al)) 
                                 
-                                # 💡 關鍵修復：將「勞健保個人負擔」與「勞工自提勞退」也強制儲存回發薪表(df_pay)，形成永久凍結的歷史紀錄
                                 save_cols = ALL_VAR_COLS + ['備註', '勞健保個人負擔', '勞工自提勞退']
                                 for col in save_cols:
                                     if col not in ['加班費', '特休折現'] and col in r: df_pay.loc[mask_p, col] = r[col]
@@ -472,7 +482,7 @@ def main():
                         ed_mgr = st.data_editor(mgr_view[edit_cols], disabled=["月份", "店別", "姓名", "現有特休", "現有補休"] if not is_locked else edit_cols, key="mp", use_container_width=True)
                         if st.button(f"💾 同步儲存{mgr_type}資料", use_container_width=True) and not is_locked:
                             for _, row in ed_mgr.iterrows():
-                                mask_p, mask_e = (df_pay['月份'].astype(str) == target_m) & (df_pay['姓名'] == row['姓名']), df_emp['姓名'] == row['姓名']
+                                mask_p, mask_e = (df_pay['月份'].astype(str) == str(target_m)) & (df_pay['姓名'] == row['姓名']), df_emp['姓名'] == row['姓名']
                                 if any(mask_p) and any(mask_e):
                                     rate_comp = clean_val(df_emp.loc[mask_e, '加班時薪'].values[0])
                                     rate_al = clean_val(df_emp.loc[mask_e, '特休時薪'].values[0])
@@ -511,7 +521,7 @@ def main():
                         if st.button(f"✅ 同意 {row['姓名']} - {row['處理方式']} ({row['時數']}hr)", key=f"oa_{idx}"):
                             if row['處理方式'] == '累積補休': df_emp.loc[df_emp['姓名'] == row['姓名'], '補休餘額'] += clean_val(row['時數'])
                             else:
-                                mask = (df_pay['月份'].astype(str) == target_m) & (df_pay['姓名'] == row['姓名'])
+                                mask = (df_pay['月份'].astype(str) == str(target_m)) & (df_pay['姓名'] == row['姓名'])
                                 if any(mask):
                                     rate = clean_val(df_emp[df_emp['姓名'] == row['姓名']].iloc[0].get('加班時薪', 0))
                                     df_pay.loc[mask, '加班費'] += float(round(rate * clean_val(row['時數'])))
@@ -550,7 +560,7 @@ def main():
                 if st.button("💾 儲存勞健保與勞退數據", use_container_width=True):
                     conn.update(worksheet=INS_SHEET, data=ed_ins_boss); st.cache_data.clear(); st.success("✅ 勞健保與自提勞退扣款資料已同步完成！")
 
-            with annotations_tab if (df_acc := None) is not None else tabs[4]: 
+            with tabs[4]: 
                 st.markdown("<h4 style='color: #162839;'>🔑 全系統登入帳號密碼維護</h4>", unsafe_allow_html=True)
                 st.data_editor(df_acc, num_rows="dynamic", key="b_acc", use_container_width=True)
 
