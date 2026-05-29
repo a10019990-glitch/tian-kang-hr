@@ -16,7 +16,6 @@ LEAVE_SHEET, OT_SHEET = "leave_requests", "ot_requests"
 
 st.set_page_config(page_title="天康藥局管理系統", layout="wide")
 
-# 💡 安全 CSS：移除干擾 Header 的語法，誓死捍衛側邊欄的 > 箭頭
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -148,7 +147,6 @@ def fetch_all_data():
         }
         std_cols = list(set(std_map.values()))
         
-        # 💡 解除強制綁定，回歸最原生、最穩定的讀取方式
         df_emp = robust_clean(conn.read(worksheet=EMP_SHEET, ttl=30), std_map, std_cols)
         df_pay = robust_clean(conn.read(worksheet=PAY_SHEET, ttl=30), std_map, std_cols + ['本月加班時數', '換補休時數', '換特休時數', '加班費', '特休折現'] + ALL_VAR_COLS)
         df_ins = robust_clean(conn.read(worksheet=INS_SHEET, ttl=30), std_map, std_cols + ['勞健保個人負擔', '勞工自提勞退'])
