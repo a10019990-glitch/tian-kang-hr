@@ -20,10 +20,8 @@ st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-    
     footer {visibility: hidden;}
     .stDeployButton {display:none;}
-    
     div[data-testid="stForm"] {
         border-radius: 12px;
         border: 1px solid #e0e3e5;
@@ -244,7 +242,7 @@ def main():
     with head_col1:
         st.markdown("<h2 style='color: #162839; margin-top:0; font-weight:700;'>🏥 天康藥局管理系統</h2>", unsafe_allow_html=True)
     with head_col2:
-        if st.button("🔄 同步雲端資料 (清除快取)", use_container_width=True): st.cache_data.clear(); st.rerun()
+        if st.button("🔄 同步雲端資料", use_container_width=True): st.cache_data.clear(); st.rerun()
     with head_col3:
         if st.button("🚪 登出管理系統", use_container_width=True): del st.session_state['auth']; st.rerun()
 
@@ -283,12 +281,7 @@ def main():
             p_pay = df_pay[df_pay['姓名'] == name].copy()
             e_info = df_emp[df_emp['姓名'] == name].iloc[0] if not df_emp[df_emp['姓名'] == name].empty else pd.Series()
             if not p_pay.empty and not e_info.empty:
-                p_pay = p_pay.drop(columns=['勞健保個人負擔', '勞工自提勞退'], errors='ignore')
-                ins_list = []
-                for m in p_pay['月份'].astype(str):
-                    v_ins = df_ins[(df_ins['姓名'] == name) & (df_ins['生效月份'].astype(str) <= m)] if '生效月份' in df_ins.columns else pd.DataFrame()
-                    ins_list.append(v_ins.sort_values('生效月份', ascending=False).iloc[0].reindex(['勞健保個人負擔', '勞工自提勞退'], fill_value=0) if not v_ins.empty else pd.Series([0, 0], index=['勞健保個人負擔', '勞工自提勞退']))
-                p_pay = pd.concat([p_pay.reset_index(drop=True), pd.DataFrame(ins_list).reset_index(drop=True)], axis=1)
+                # 💡 歷史快照機制：員工查詢時，絕對不覆蓋 df_pay 中已經寫死的保險紀錄！
                 b_cols = PHARMACY_VAR if e_info.get('單位') == "藥局" else CASE_MGR_VAR
                 for c in ALL_VAR_COLS + ['勞健保個人負擔', '勞工自提勞退', '本月加班時數', '換補休時數', '換特休時數']: p_pay[c] = pd.to_numeric(p_pay[c], errors='coerce').fillna(0)
                 
@@ -347,7 +340,20 @@ def main():
                                 if st.button("🚀 建立新月份欄位", use_container_width=True):
                                     l_rem = df_pay.sort_values(['姓名','月份'], ascending=[True,False]).drop_duplicates('姓名')[['姓名','備註']] if not df_pay.empty else pd.DataFrame(columns=['姓名','備註'])
                                     new_r = pd.DataFrame({"月份":[new_m]*len(df_emp), "店別":df_emp["店別"], "姓名":df_emp["姓名"], "備註":df_emp[['姓名']].merge(l_rem, on='姓名', how='left')["備註"].fillna("").tolist()})
-                                    for c in ALL_VAR_COLS + ['本月加班時數', '換補休時數', '換特休時數', '勞健保個人負擔', '勞工自提勞退']: new_r[c] = 0.0
+                                    for c in ALL_VAR_COLS + ['本月加班時數', '換補休時數', '換特休時數']: new_r[c] = 0.0
+                                    
+                                    # 💡 建立新月份即「拍下保險歷史快照」
+                                    ins_list = []
+                                    for n in new_r['姓名']:
+                                        v_ins = df_ins[(df_ins['姓名'] == n) & (df_ins['生效月份'].astype(str) <= str(new_m))] if '生效月份' in df_ins.columns else pd.DataFrame()
+                                        if not v_ins.empty:
+                                            latest_ins = v_ins.sort_values('生效月份', ascending=False).iloc[0]
+                                            ins_list.append({'勞健保個人負擔': clean_val(latest_ins.get('勞健保個人負擔', 0)), '勞工自提勞退': clean_val(latest_ins.get('勞工自提勞退', 0))})
+                                        else:
+                                            ins_list.append({'勞健保個人負擔': 0.0, '勞工自提勞退': 0.0})
+                                    ins_df = pd.DataFrame(ins_list)
+                                    new_r['勞健保個人負擔'] = ins_df['勞健保個人負擔']
+                                    new_r['勞工自提勞退'] = ins_df['勞工自提勞退']
                                     
                                     conn.update(worksheet=PAY_SHEET, data=pd.concat([df_pay, new_r], ignore_index=True))
                                     if str(new_m) not in df_lock['月份'].astype(str).values:
@@ -382,19 +388,6 @@ def main():
                     curr = curr.merge(df_emp[['姓名'] + [c for c in cols_from_emp if c in df_emp.columns]], on='姓名', how='left')
                     curr.rename(columns={'補休餘額': '現有補休', '剩餘特休時數': '現有特休'}, inplace=True)
                     
-                    for col in ['勞健保個人負擔', '勞工自提勞退']:
-                        if col not in curr.columns: curr[col] = 0.0
-                        curr[col] = pd.to_numeric(curr[col], errors='coerce').fillna(0.0)
-                    
-                    for idx, r in curr.iterrows():
-                        if r['勞健保個人負擔'] == 0 and r['勞工自提勞退'] == 0:
-                            n = r['姓名']
-                            v = df_ins[(df_ins['姓名'] == n) & (df_ins['生效月份'].astype(str) <= str(target_m))] if '生效月份' in df_ins.columns else pd.DataFrame()
-                            if not v.empty:
-                                latest_ins = v.sort_values('生效月份', ascending=False).iloc[0]
-                                curr.at[idx, '勞健保個人負擔'] = clean_val(latest_ins.get('勞健保個人負擔', 0))
-                                curr.at[idx, '勞工自提勞退'] = clean_val(latest_ins.get('勞工自提勞退', 0))
-                                
                     calc_cols = ALL_VAR_COLS + ['本薪', '績效獎金(評估表現發放)', '保障獎金', '固定加班津貼', '勞健保個人負擔', '勞工自提勞退', '本月加班時數', '換補休時數', '換特休時數', '現有補休', '現有特休', '執照津貼', '車資補貼']
                     for c in calc_cols: 
                         if c not in curr.columns: curr[c] = 0.0
@@ -403,11 +396,12 @@ def main():
                     curr['應付金額'] = (curr['本薪'] + curr['績效獎金(評估表現發放)'] + curr['保障獎金'] + curr['固定加班津貼'] + curr['執照津貼'] + curr['車資補貼'] + curr[ALL_VAR_COLS].sum(axis=1)) - curr['勞健保個人負擔'] - curr['勞工自提勞退']
                     
                     st.markdown("<h4 style='color: #162839; margin-top:24px;'>💊 藥局組薪資總表</h4>", unsafe_allow_html=True)
+                    # 💡 老闆擁有特權：如果當月因為換保級距不對，可以直接在畫面上編輯「勞健保」與「勞退」，存檔後一輩子鎖死！
                     base_show_cols = ['月份','店別','姓名','現有特休','現有補休','本月加班時數','換補休時數','換特休時數', '本薪', '績效獎金(評估表現發放)', '保障獎金', '固定加班津貼', '執照津貼', '車資補貼', '加班費', '特休折現', '勞健保個人負擔', '勞工自提勞退', '應付金額', '電子郵件']
-                    ed_p = st.data_editor(curr[curr['單位'] == "藥局"][base_show_cols + PHARMACY_VAR + ['備註']], disabled=["現有特休", "現有補休", "勞健保個人負擔", "勞工自提勞退", "加班費", "特休折現"] if not is_locked else True, key="bp", use_container_width=True)
+                    ed_p = st.data_editor(curr[curr['單位'] == "藥局"][base_show_cols + PHARMACY_VAR + ['備註']], disabled=["現有特休", "現有補休", "加班費", "特休折現", "應付金額"] if not is_locked else True, key="bp", use_container_width=True)
                     
                     st.markdown("<h4 style='color: #162839; margin-top: 24px;'>📂 個管師組薪資總表</h4>", unsafe_allow_html=True)
-                    ed_c = st.data_editor(curr[curr['單位'] == "個管師"][base_show_cols + CASE_MGR_VAR + ['備註']], disabled=["現有特休", "現有補休", "勞健保個人負擔", "勞工自提勞退", "加班費", "特休折現"] if not is_locked else True, key="bc", use_container_width=True)
+                    ed_c = st.data_editor(curr[curr['單位'] == "個管師"][base_show_cols + CASE_MGR_VAR + ['備註']], disabled=["現有特休", "現有補休", "加班費", "特休折現", "應付金額"] if not is_locked else True, key="bc", use_container_width=True)
                     
                     if st.button("💾 儲存並同步發薪資料", use_container_width=True) and not is_locked:
                         for _, r in pd.concat([ed_p, ed_c]).iterrows():
