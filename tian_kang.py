@@ -16,11 +16,15 @@ LEAVE_SHEET, OT_SHEET = "leave_requests", "ot_requests"
 
 st.set_page_config(page_title="天康藥局管理系統", layout="wide")
 
+# 💡 安全 CSS：移除干擾 Header 的語法，誓死捍衛側邊欄的 > 箭頭
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+    
     footer {visibility: hidden;}
+    .stDeployButton {display:none;}
+    
     div[data-testid="stForm"] {
         border-radius: 12px;
         border: 1px solid #e0e3e5;
@@ -144,13 +148,14 @@ def fetch_all_data():
         }
         std_cols = list(set(std_map.values()))
         
-        df_emp = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=EMP_SHEET, ttl=30), std_map, std_cols)
-        df_pay = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=PAY_SHEET, ttl=30), std_map, std_cols + ['本月加班時數', '換補休時數', '換特休時數', '加班費', '特休折現'] + ALL_VAR_COLS)
-        df_ins = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=INS_SHEET, ttl=30), std_map, std_cols + ['勞健保個人負擔', '勞工自提勞退'])
-        df_acc = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=ACC_SHEET, ttl=30), None, ["帳號", "密碼", "姓名", "身分證"])
-        df_lv = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=LEAVE_SHEET, ttl=30), None, ["日期", "姓名", "類別", "時數", "狀態"])
-        df_ot = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=OT_SHEET, ttl=30), None, ["日期", "姓名", "時數", "處理方式", "狀態"])
-        try: df_lock = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=LOCK_SHEET, ttl=30), None, ["月份", "狀態"])
+        # 💡 解除強制綁定，回歸最原生、最穩定的讀取方式
+        df_emp = robust_clean(conn.read(worksheet=EMP_SHEET, ttl=30), std_map, std_cols)
+        df_pay = robust_clean(conn.read(worksheet=PAY_SHEET, ttl=30), std_map, std_cols + ['本月加班時數', '換補休時數', '換特休時數', '加班費', '特休折現'] + ALL_VAR_COLS)
+        df_ins = robust_clean(conn.read(worksheet=INS_SHEET, ttl=30), std_map, std_cols + ['勞健保個人負擔', '勞工自提勞退'])
+        df_acc = robust_clean(conn.read(worksheet=ACC_SHEET, ttl=30), None, ["帳號", "密碼", "姓名", "身分證"])
+        df_lv = robust_clean(conn.read(worksheet=LEAVE_SHEET, ttl=30), None, ["日期", "姓名", "類別", "時數", "狀態"])
+        df_ot = robust_clean(conn.read(worksheet=OT_SHEET, ttl=30), None, ["日期", "姓名", "時數", "處理方式", "狀態"])
+        try: df_lock = robust_clean(conn.read(worksheet=LOCK_SHEET, ttl=30), None, ["月份", "狀態"])
         except: df_lock = pd.DataFrame(columns=['月份', '狀態'])
         
         if '月份' in df_pay.columns:
@@ -166,9 +171,7 @@ def fetch_all_data():
             if col in df_ins.columns: df_ins[col] = pd.to_numeric(df_ins[col], errors='coerce').fillna(0.0)
         return df_emp, df_pay, df_ins, df_acc, df_lv, df_ot, df_lock
     except Exception as e:
-        # 💡 顯示真實錯誤！
-        st.error(f"🚨 Google 資料庫連線錯誤！\n\n大助，請將這段英文報錯貼給我：\n`{str(e)}`")
-        st.stop()
+        st.error(f"🚨 API 讀取發生錯誤：\n\n`{str(e)}`"); st.stop()
 
 def main():
     try:
@@ -179,9 +182,7 @@ def main():
         df_emp = df_emp.loc[:, ~df_emp.columns.duplicated()].copy()
         df_ins = df_ins.loc[:, ~df_ins.columns.duplicated()].copy()
     except Exception as e:
-        # 💡 顯示真實錯誤！
-        st.error(f"🚨 系統載入發生嚴重錯誤！\n\n大助，請將這段英文報錯貼給我：\n`{str(e)}`")
-        st.stop()
+        st.error(f"🚨 系統連線發生錯誤：\n\n`{str(e)}`"); st.stop()
 
     if 'auth' not in st.session_state:
         st.markdown("<br><br><br>", unsafe_allow_html=True)
@@ -236,7 +237,7 @@ def main():
                         elif new_acc in df_acc['帳號'].values: st.warning("⚠️ 此帳號已被使用。")
                         else:
                             new_user = pd.DataFrame({"帳號": [new_acc], "密碼": [hash_password(new_pw)], "姓名": [new_name.replace(" ", "")], "身分證": [new_id]})
-                            conn.update(spreadsheet=SHEET_ID, worksheet=ACC_SHEET, data=pd.concat([df_acc, new_user], ignore_index=True))
+                            conn.update(worksheet=ACC_SHEET, data=pd.concat([df_acc, new_user], ignore_index=True))
                             st.cache_data.clear(); st.success("✅ 註冊成功！請切換入口登入。")
         return
 
@@ -245,7 +246,7 @@ def main():
     with head_col1:
         st.markdown("<h2 style='color: #162839; margin-top:0; font-weight:700;'>🏥 天康藥局管理系統</h2>", unsafe_allow_html=True)
     with head_col2:
-        if st.button("🔄 同步雲端資料", use_container_width=True): st.cache_data.clear(); st.rerun()
+        if st.button("🔄 同步雲端資料 (清除快取)", use_container_width=True): st.cache_data.clear(); st.rerun()
     with head_col3:
         if st.button("🚪 登出管理系統", use_container_width=True): del st.session_state['auth']; st.rerun()
 
@@ -315,9 +316,9 @@ def main():
                     ld = st.date_input("日期選擇")
                 lr = st.text_area("申請事由", placeholder="請輸入原因...")
                 if st.form_submit_button("送出申請"):
-                    if "加班" in lt: conn.update(spreadsheet=SHEET_ID, worksheet=OT_SHEET, data=pd.concat([df_ot, pd.DataFrame({"日期":[str(ld)],"姓名":[name],"時數":[lh],"處理方式":["累積補休"],"原因":[lr],"狀態":["待審核"]})], ignore_index=True))
-                    elif "補休" in lt: conn.update(spreadsheet=SHEET_ID, worksheet=OT_SHEET, data=pd.concat([df_ot, pd.DataFrame({"日期":[str(ld)],"姓名":[name],"時數":[lh],"處理方式":["換錢"],"原因":["補休核現"],"狀態":["待審核"]})], ignore_index=True))
-                    else: conn.update(spreadsheet=SHEET_ID, worksheet=LEAVE_SHEET, data=pd.concat([df_lv, pd.DataFrame({"日期":[str(ld)],"姓名":[name],"類別":[lt],"時數":[lh],"事由":[lr],"狀態":["待審核"]})], ignore_index=True))
+                    if "加班" in lt: conn.update(worksheet=OT_SHEET, data=pd.concat([df_ot, pd.DataFrame({"日期":[str(ld)],"姓名":[name],"時數":[lh],"處理方式":["累積補休"],"原因":[lr],"狀態":["待審核"]})], ignore_index=True))
+                    elif "補休" in lt: conn.update(worksheet=OT_SHEET, data=pd.concat([df_ot, pd.DataFrame({"日期":[str(ld)],"姓名":[name],"時數":[lh],"處理方式":["換錢"],"原因":["補休核現"],"狀態":["待審核"]})], ignore_index=True))
+                    else: conn.update(worksheet=LEAVE_SHEET, data=pd.concat([df_lv, pd.DataFrame({"日期":[str(ld)],"姓名":[name],"類別":[lt],"時數":[lh],"事由":[lr],"狀態":["待審核"]})], ignore_index=True))
                     st.cache_data.clear(); st.success("✅ 已提交申請！")
         with t3: 
             st.dataframe(df_lv[df_lv['姓名']==name], use_container_width=True)
@@ -350,15 +351,15 @@ def main():
                                     new_r = pd.DataFrame({"月份":[new_m]*len(df_emp), "店別":df_emp["店別"], "姓名":df_emp["姓名"], "備註":df_emp[['姓名']].merge(l_rem, on='姓名', how='left')["備註"].fillna("").tolist()})
                                     for c in ALL_VAR_COLS + ['本月加班時數', '換補休時數', '換特休時數', '勞健保個人負擔', '勞工自提勞退']: new_r[c] = 0.0
                                     
-                                    conn.update(spreadsheet=SHEET_ID, worksheet=PAY_SHEET, data=pd.concat([df_pay, new_r], ignore_index=True))
+                                    conn.update(worksheet=PAY_SHEET, data=pd.concat([df_pay, new_r], ignore_index=True))
                                     if str(new_m) not in df_lock['月份'].astype(str).values:
                                         new_lock_row = pd.DataFrame({"月份": [str(new_m)], "狀態": ["OPEN"]})
-                                        conn.update(spreadsheet=SHEET_ID, worksheet=LOCK_SHEET, data=pd.concat([df_lock, new_lock_row], ignore_index=True))
+                                        conn.update(worksheet=LOCK_SHEET, data=pd.concat([df_lock, new_lock_row], ignore_index=True))
                                     
                                     st.cache_data.clear(); st.success(f"✅ {new_m} 月份薪資表與鎖定分頁已同步連動建立！"); st.rerun()
                             with c_btn2:
                                 if st.button("🔒 變更本月鎖定狀態", use_container_width=True):
-                                    conn.update(spreadsheet=SHEET_ID, worksheet=LOCK_SHEET, data=pd.concat([df_lock[df_lock['月份'].astype(str) != str(target_m)], pd.DataFrame({"月份":[str(target_m)],"狀態":["OPEN" if is_locked else "LOCKED"]})], ignore_index=True)); st.cache_data.clear(); st.rerun()
+                                    conn.update(worksheet=LOCK_SHEET, data=pd.concat([df_lock[df_lock['月份'].astype(str) != str(target_m)], pd.DataFrame({"月份":[str(target_m)],"狀態":["OPEN" if is_locked else "LOCKED"]})], ignore_index=True)); st.cache_data.clear(); st.rerun()
                             
                             st.markdown("<hr style='margin: 8px 0; border-color: #eee;'>", unsafe_allow_html=True)
                             st.markdown("<p style='color: #ba1a1a; font-weight: 600; margin-bottom:0;'>🔥 危險操作區域</p>", unsafe_allow_html=True)
@@ -367,8 +368,8 @@ def main():
                             confirm_delete = st.checkbox("我已確認後果，同意永久刪除此月份所有同仁發薪與鎖定資料", key="chk_del")
                             if st.button("🔥 確定執行刪除", use_container_width=True):
                                 if confirm_delete:
-                                    conn.update(spreadsheet=SHEET_ID, worksheet=PAY_SHEET, data=df_pay[df_pay['月份'].astype(str) != del_m])
-                                    conn.update(spreadsheet=SHEET_ID, worksheet=LOCK_SHEET, data=df_lock[df_lock['月份'].astype(str) != del_m])
+                                    conn.update(worksheet=PAY_SHEET, data=df_pay[df_pay['月份'].astype(str) != del_m])
+                                    conn.update(worksheet=LOCK_SHEET, data=df_lock[df_lock['月份'].astype(str) != del_m])
                                     st.cache_data.clear()
                                     st.success(f"✅ 已成功完全刪除 {del_m} 月份的所有歷史發薪與鎖定快照！")
                                     st.rerun()
@@ -429,7 +430,7 @@ def main():
                                 save_cols = ALL_VAR_COLS + ['備註', '勞健保個人負擔', '勞工自提勞退']
                                 for col in save_cols:
                                     if col not in ['加班費', '特休折現'] and col in r: df_pay.loc[mask_p, col] = r[col]
-                        conn.update(spreadsheet=SHEET_ID, worksheet=PAY_SHEET, data=df_pay); conn.update(spreadsheet=SHEET_ID, worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.success("✅ 全體發薪資料（含保費與勞退快照）已順暢寫入 Google 試算表！")
+                        conn.update(worksheet=PAY_SHEET, data=df_pay); conn.update(worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.success("✅ 全體發薪資料（含保費與勞退快照）已順暢寫入 Google 試算表！")
                     
                     st.markdown("<hr style='border-color: #e0e3e5;'>", unsafe_allow_html=True)
                     c1, c2, c3, c4 = st.columns(4)
@@ -494,7 +495,7 @@ def main():
                                     df_pay.loc[mask_p, '特休折現'] = float(round(new_al_cash * rate_al))
                                     
                                     for col in var_cols + ['備註']: df_pay.loc[mask_p, col] = row[col]
-                            conn.update(spreadsheet=SHEET_ID, worksheet=PAY_SHEET, data=df_pay); conn.update(spreadsheet=SHEET_ID, worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.success(f"✅ {mgr_type}發薪資料更新存檔成功！")
+                            conn.update(worksheet=PAY_SHEET, data=df_pay); conn.update(worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.success(f"✅ {mgr_type}發薪資料更新存檔成功！")
                     else: st.info(f"尚無{mgr_type}人員資料。")
 
         if role == 1:
@@ -507,8 +508,8 @@ def main():
                             rule = LEAVE_TYPES.get(row['類別'], {})
                             if rule.get('deduct') in df_emp.columns:
                                 df_emp.loc[df_emp['姓名'] == row['姓名'], rule['deduct']] -= clean_val(row['時數'])
-                                conn.update(spreadsheet=SHEET_ID, worksheet=EMP_SHEET, data=df_emp)
-                            df_lv.at[idx, '狀態'] = '已核准'; conn.update(spreadsheet=SHEET_ID, worksheet=LEAVE_SHEET, data=df_lv); st.cache_data.clear(); st.rerun()
+                                conn.update(worksheet=EMP_SHEET, data=df_emp)
+                            df_lv.at[idx, '狀態'] = '已核准'; conn.update(worksheet=LEAVE_SHEET, data=df_lv); st.cache_data.clear(); st.rerun()
                 else: st.write("👍 目前沒有任何同仁的「請假申請」需要審核。")
                 
                 st.markdown("<h4 style='color: #162839; margin-top:24px;'>📑 加班/換現申請審核中心</h4>", unsafe_allow_html=True)
@@ -523,8 +524,8 @@ def main():
                                     rate = clean_val(df_emp[df_emp['姓名'] == row['姓名']].iloc[0].get('加班時薪', 0))
                                     df_pay.loc[mask, '加班費'] += float(round(rate * clean_val(row['時數'])))
                                     df_emp.loc[df_emp['姓名'] == row['姓名'], '補休餘額'] -= clean_val(row['時數'])
-                                    conn.update(spreadsheet=SHEET_ID, worksheet=PAY_SHEET, data=df_pay)
-                            df_ot.at[idx, '狀態'] = '已執行'; conn.update(spreadsheet=SHEET_ID, worksheet=OT_SHEET, data=df_ot); conn.update(spreadsheet=SHEET_ID, worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.rerun()
+                                    conn.update(worksheet=PAY_SHEET, data=df_pay)
+                            df_ot.at[idx, '狀態'] = '已執行'; conn.update(worksheet=OT_SHEET, data=df_ot); conn.update(worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.rerun()
                 else: st.write("👍 目前沒有任何同仁的「加班/核現申請」需要審核。")
 
             with tabs[2]:
@@ -545,17 +546,17 @@ def main():
                                 df_emp.at[idx, '累計應得特休'] = current_entitlement
                                 count += 1
                         if count > 0:
-                            conn.update(spreadsheet=SHEET_ID, worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.success(f"✅ 結算完成！已自動幫 {count} 位跨年資門檻的同仁補發特休時數。")
+                            conn.update(worksheet=EMP_SHEET, data=df_emp); st.cache_data.clear(); st.success(f"✅ 結算完成！已自動幫 {count} 位跨年資門檻的同仁補發特休時數。")
                         else: st.warning("目前所有同仁的特休時數皆已符合最新年資，無重複發放。")
                 
                 ed_emp = st.data_editor(df_emp, num_rows="dynamic", key="b_main", use_container_width=True)
-                if st.button("💾 儲存主資料庫更新", use_container_width=True): conn.update(spreadsheet=SHEET_ID, worksheet=EMP_SHEET, data=ed_emp); st.cache_data.clear(); st.success("✅ 員工資料庫已同步更新完成！")
+                if st.button("💾 儲存主資料庫更新", use_container_width=True): conn.update(worksheet=EMP_SHEET, data=ed_emp); st.cache_data.clear(); st.success("✅ 員工資料庫已同步更新完成！")
 
             with tabs[3]:
                 st.markdown("<h4 style='color: #162839;'>🏥 勞健保個人負擔與勞退自提紀錄維護</h4>", unsafe_allow_html=True)
                 ed_ins_boss = st.data_editor(df_ins, num_rows="dynamic", key="b_ins", use_container_width=True)
                 if st.button("💾 儲存勞健保與勞退數據", use_container_width=True):
-                    conn.update(spreadsheet=SHEET_ID, worksheet=INS_SHEET, data=ed_ins_boss); st.cache_data.clear(); st.success("✅ 勞健保與自提勞退扣款資料已同步完成！")
+                    conn.update(worksheet=INS_SHEET, data=ed_ins_boss); st.cache_data.clear(); st.success("✅ 勞健保與自提勞退扣款資料已同步完成！")
 
             with tabs[4]: 
                 st.markdown("<h4 style='color: #162839;'>🔑 全系統登入帳號密碼維護</h4>", unsafe_allow_html=True)
@@ -565,7 +566,7 @@ def main():
             with tabs[0]:
                 st.markdown("<h4 style='color: #162839;'>🏥 勞健保與勞退（會計專屬維護）</h4>", unsafe_allow_html=True)
                 ed_acct = st.data_editor(df_ins, num_rows="dynamic", key="ac_view", use_container_width=True)
-                if st.button("💾 會計端更新存檔", use_container_width=True): conn.update(spreadsheet=SHEET_ID, worksheet=INS_SHEET, data=ed_acct); st.cache_data.clear(); st.success("✅ 會計端資料已更新儲存。")
+                if st.button("💾 會計端更新存檔", use_container_width=True): conn.update(worksheet=INS_SHEET, data=ed_acct); st.cache_data.clear(); st.success("✅ 會計端資料已更新儲存。")
 
 if __name__ == "__main__":
     main()
