@@ -14,10 +14,8 @@ PAY_SHEET, EMP_SHEET, INS_SHEET = "salary_data", "emp_info", "ins_info"
 ACC_SHEET, LOCK_SHEET = "user_accounts", "lock_status"
 LEAVE_SHEET, OT_SHEET = "leave_requests", "ot_requests"
 
-# 💡 UI 安全化：保持標準側邊欄配置，不強制收納
 st.set_page_config(page_title="天康藥局管理系統", layout="wide")
 
-# 💡 安全注入 CSS：移除任何會干擾 header 與側邊欄切換鈕的危險隱藏語法
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -149,13 +147,13 @@ def fetch_all_data():
         df_emp = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=EMP_SHEET, ttl=30), std_map, std_cols)
         df_pay = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=PAY_SHEET, ttl=30), std_map, std_cols + ['本月加班時數', '換補休時數', '換特休時數', '加班費', '特休折現'] + ALL_VAR_COLS)
         df_ins = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=INS_SHEET, ttl=30), std_map, std_cols + ['勞健保個人負擔', '勞工自提勞退'])
-        df_acc = robust_clean(spreadsheet=SHEET_ID, worksheet=ACC_SHEET, ttl=30), None, ["帳號", "密碼", "姓名", "身分證"])
+        # 💡 修正語法錯誤：加入 conn.read 確保數據能正常被下載與清洗
+        df_acc = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=ACC_SHEET, ttl=30), None, ["帳號", "密碼", "姓名", "身分證"])
         df_lv = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=LEAVE_SHEET, ttl=30), None, ["日期", "姓名", "類別", "時數", "狀態"])
         df_ot = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=OT_SHEET, ttl=30), None, ["日期", "姓名", "時數", "處理方式", "狀態"])
         try: df_lock = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=LOCK_SHEET, ttl=30), None, ["月份", "狀態"])
         except: df_lock = pd.DataFrame(columns=['月份', '狀態'])
         
-        # 💡 資料清洗對齊：強制將資料庫讀出的所有月份欄位，統一清洗為 YYYY-MM 純字串，根除代溝問題
         if '月份' in df_pay.columns:
             df_pay['月份'] = df_pay['月份'].astype(str).str.strip().str.extract(r'^(\d{4}-\d{2})')[0].fillna(df_pay['月份'].astype(str))
         if '月份' in df_lock.columns:
@@ -177,7 +175,6 @@ def main():
         df_emp, df_pay, df_ins, df_acc, df_lv, df_ot, df_lock = fetch_all_data()
         conn = st.connection("gsheets", type=GSheetsConnection)
         
-        # 鐵甲防護盾：欄位去重
         df_pay = df_pay.loc[:, ~df_pay.columns.duplicated()].copy()
         df_emp = df_emp.loc[:, ~df_emp.columns.duplicated()].copy()
         df_ins = df_ins.loc[:, ~df_ins.columns.duplicated()].copy()
@@ -241,7 +238,6 @@ def main():
                             st.cache_data.clear(); st.success("✅ 註冊成功！請切換入口登入。")
         return
 
-    # 主畫面頂部導覽
     head_col1, head_col2, head_col3 = st.columns([6, 1.5, 1.5])
     with head_col1:
         st.markdown("<h2 style='color: #162839; margin-top:0; font-weight:700;'>🏥 天康藥局管理系統</h2>", unsafe_allow_html=True)
@@ -351,7 +347,6 @@ def main():
                                     new_r = pd.DataFrame({"月份":[new_m]*len(df_emp), "店別":df_emp["店別"], "姓名":df_emp["姓名"], "備註":df_emp[['姓名']].merge(l_rem, on='姓名', how='left')["備註"].fillna("").tolist()})
                                     for c in ALL_VAR_COLS + ['本月加班時數', '換補休時數', '換特休時數', '勞健保個人負擔', '勞工自提勞退']: new_r[c] = 0.0
                                     
-                                    # 💡 雙向聯動優化：建立新月份時，自動向 lock_status 寫入 OPEN 初始化狀態，確保選單能即時刷新比對
                                     conn.update(spreadsheet=SHEET_ID, worksheet=PAY_SHEET, data=pd.concat([df_pay, new_r], ignore_index=True))
                                     if str(new_m) not in df_lock['月份'].astype(str).values:
                                         new_lock_row = pd.DataFrame({"月份": [str(new_m)], "狀態": ["OPEN"]})
@@ -366,7 +361,6 @@ def main():
                             st.markdown("<p style='color: #ba1a1a; font-weight: 600; margin-bottom:0;'>🔥 危險操作區域</p>", unsafe_allow_html=True)
                             del_m = st.selectbox("選擇要刪除的月份", all_m, key="del_box")
                             
-                            # 💡 狀態鎖定優化：將確認刪除方塊完全獨立拉至按鈕上方，徹底解決因元件嵌套重繪導致勾選消失的缺陷
                             confirm_delete = st.checkbox("我已確認後果，同意永久刪除此月份所有同仁發薪與鎖定資料", key="chk_del")
                             if st.button("🔥 確定執行刪除", use_container_width=True):
                                 if confirm_delete:
@@ -453,7 +447,7 @@ def main():
                             count = 0
                             for _, r in ed_c.iterrows():
                                 if not pd.isna(r.get('電子郵件')) and str(r.get('電子郵件')).strip() != "":
-                                    d = {"本薪": r.get('本薪', 0), "績效獎金(評估表現發放)": r.get('績效獎金(評估表現發放)', 0), "保障獎金": r.get('保障獎金', 0), "固定加班津貼": r.get('固定加班津貼', 0), "執照津貼": r.get('執照津貼', 0), "車資補貼": r.get('車資補貼', 0), "加班費": r.get('加班費', 0), "特休折現": r.get('特休折現', 0)}
+                                    d = {"本薪": r.get('本薪', 0), "績效獎金(評估表現發放)": r.get('績效獎金(評估表現發放)', 0), "保障獎金": r.get('保障獎金', 0), "固定加班津貼": r.get('固定加班津估', 0), "執照津貼": r.get('執照津貼', 0), "車資補貼": r.get('車資補貼', 0), "加班費": r.get('加班費', 0), "特休折現": r.get('特休折現', 0)}
                                     for b in CASE_MGR_VAR: d[b] = r.get(b, 0)
                                     d.update({"本月加班時數": r.get('本月加班時數', 0), "換補休時數": r.get('換補休時數', 0), "換特休時數": r.get('換特休時數', 0), "勞健保扣款": r.get('勞健保個人負擔', 0), "勞退自提扣款": r.get('勞工自提勞退', 0), "實領總額": r.get('應付金額', 0), "備註說明": r.get('備註', '')})
                                     if send_salary_email(r['電子郵件'], r['姓名'], target_m, d): count += 1
@@ -511,7 +505,7 @@ def main():
                             if rule.get('deduct') in df_emp.columns:
                                 df_emp.loc[df_emp['姓名'] == row['姓名'], rule['deduct']] -= clean_val(row['時數'])
                                 conn.update(spreadsheet=SHEET_ID, worksheet=EMP_SHEET, data=df_emp)
-                            df_lv.at[idx, '狀態'] = '已核准'; conn.update(spreadsheet=SHEET_ID, worksheet=LEAVE_SHEET, data=df_lv); st.cache_data.clear(); st.rerun()
+                            df_lv.at[idx, '狀態'] = '現准'; conn.update(spreadsheet=SHEET_ID, worksheet=LEAVE_SHEET, data=df_lv); st.cache_data.clear(); st.rerun()
                 else: st.write("👍 目前沒有任何同仁的「請假申請」需要審核。")
                 
                 st.markdown("<h4 style='color: #162839; margin-top:24px;'>📑 加班/換現申請審核中心</h4>", unsafe_allow_html=True)
