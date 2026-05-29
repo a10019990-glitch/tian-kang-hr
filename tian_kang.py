@@ -147,7 +147,6 @@ def fetch_all_data():
         df_emp = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=EMP_SHEET, ttl=30), std_map, std_cols)
         df_pay = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=PAY_SHEET, ttl=30), std_map, std_cols + ['本月加班時數', '換補休時數', '換特休時數', '加班費', '特休折現'] + ALL_VAR_COLS)
         df_ins = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=INS_SHEET, ttl=30), std_map, std_cols + ['勞健保個人負擔', '勞工自提勞退'])
-        # 💡 修正語法錯誤：加入 conn.read 確保數據能正常被下載與清洗
         df_acc = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=ACC_SHEET, ttl=30), None, ["帳號", "密碼", "姓名", "身分證"])
         df_lv = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=LEAVE_SHEET, ttl=30), None, ["日期", "姓名", "類別", "時數", "狀態"])
         df_ot = robust_clean(conn.read(spreadsheet=SHEET_ID, worksheet=OT_SHEET, ttl=30), None, ["日期", "姓名", "時數", "處理方式", "狀態"])
@@ -167,8 +166,9 @@ def fetch_all_data():
             if col in df_ins.columns: df_ins[col] = pd.to_numeric(df_ins[col], errors='coerce').fillna(0.0)
         return df_emp, df_pay, df_ins, df_acc, df_lv, df_ot, df_lock
     except Exception as e:
-        if "429" in str(e): st.error("🚨 API 配額用盡，請稍候再重新載入。"); st.stop()
-        else: raise e
+        # 💡 顯示真實錯誤！
+        st.error(f"🚨 Google 資料庫連線錯誤！\n\n大助，請將這段英文報錯貼給我：\n`{str(e)}`")
+        st.stop()
 
 def main():
     try:
@@ -179,7 +179,9 @@ def main():
         df_emp = df_emp.loc[:, ~df_emp.columns.duplicated()].copy()
         df_ins = df_ins.loc[:, ~df_ins.columns.duplicated()].copy()
     except Exception as e:
-        st.error("🚨 系統連線暫時受到限制。請稍候再試。"); st.stop()
+        # 💡 顯示真實錯誤！
+        st.error(f"🚨 系統載入發生嚴重錯誤！\n\n大助，請將這段英文報錯貼給我：\n`{str(e)}`")
+        st.stop()
 
     if 'auth' not in st.session_state:
         st.markdown("<br><br><br>", unsafe_allow_html=True)
@@ -238,11 +240,12 @@ def main():
                             st.cache_data.clear(); st.success("✅ 註冊成功！請切換入口登入。")
         return
 
+    # 主畫面頂部導覽
     head_col1, head_col2, head_col3 = st.columns([6, 1.5, 1.5])
     with head_col1:
         st.markdown("<h2 style='color: #162839; margin-top:0; font-weight:700;'>🏥 天康藥局管理系統</h2>", unsafe_allow_html=True)
     with head_col2:
-        if st.button("🔄 同步雲端資料 (清除快取)", use_container_width=True): st.cache_data.clear(); st.rerun()
+        if st.button("🔄 同步雲端資料", use_container_width=True): st.cache_data.clear(); st.rerun()
     with head_col3:
         if st.button("🚪 登出管理系統", use_container_width=True): del st.session_state['auth']; st.rerun()
 
@@ -447,7 +450,7 @@ def main():
                             count = 0
                             for _, r in ed_c.iterrows():
                                 if not pd.isna(r.get('電子郵件')) and str(r.get('電子郵件')).strip() != "":
-                                    d = {"本薪": r.get('本薪', 0), "績效獎金(評估表現發放)": r.get('績效獎金(評估表現發放)', 0), "保障獎金": r.get('保障獎金', 0), "固定加班津貼": r.get('固定加班津估', 0), "執照津貼": r.get('執照津貼', 0), "車資補貼": r.get('車資補貼', 0), "加班費": r.get('加班費', 0), "特休折現": r.get('特休折現', 0)}
+                                    d = {"本薪": r.get('本薪', 0), "績效獎金(評估表現發放)": r.get('績效獎金(評估表現發放)', 0), "保障獎金": r.get('保障獎金', 0), "固定加班津貼": r.get('固定加班津貼', 0), "執照津貼": r.get('執照津貼', 0), "車資補貼": r.get('車資補貼', 0), "加班費": r.get('加班費', 0), "特休折現": r.get('特休折現', 0)}
                                     for b in CASE_MGR_VAR: d[b] = r.get(b, 0)
                                     d.update({"本月加班時數": r.get('本月加班時數', 0), "換補休時數": r.get('換補休時數', 0), "換特休時數": r.get('換特休時數', 0), "勞健保扣款": r.get('勞健保個人負擔', 0), "勞退自提扣款": r.get('勞工自提勞退', 0), "實領總額": r.get('應付金額', 0), "備註說明": r.get('備註', '')})
                                     if send_salary_email(r['電子郵件'], r['姓名'], target_m, d): count += 1
@@ -505,7 +508,7 @@ def main():
                             if rule.get('deduct') in df_emp.columns:
                                 df_emp.loc[df_emp['姓名'] == row['姓名'], rule['deduct']] -= clean_val(row['時數'])
                                 conn.update(spreadsheet=SHEET_ID, worksheet=EMP_SHEET, data=df_emp)
-                            df_lv.at[idx, '狀態'] = '現准'; conn.update(spreadsheet=SHEET_ID, worksheet=LEAVE_SHEET, data=df_lv); st.cache_data.clear(); st.rerun()
+                            df_lv.at[idx, '狀態'] = '已核准'; conn.update(spreadsheet=SHEET_ID, worksheet=LEAVE_SHEET, data=df_lv); st.cache_data.clear(); st.rerun()
                 else: st.write("👍 目前沒有任何同仁的「請假申請」需要審核。")
                 
                 st.markdown("<h4 style='color: #162839; margin-top:24px;'>📑 加班/換現申請審核中心</h4>", unsafe_allow_html=True)
